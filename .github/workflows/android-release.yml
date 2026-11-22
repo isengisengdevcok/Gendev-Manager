@@ -1,0 +1,134 @@
+name: GENDEV MANAGER Android CI/CD Release
+
+on:
+  push:
+    branches:
+      - main
+      - master
+  workflow_dispatch:
+    inputs:
+      version_name:
+        description: "Release version tag (e.g. 1.0.0)"
+        required: false
+        default: "1.0.0"
+
+permissions:
+  contents: write
+
+jobs:
+  build_and_release:
+    name: Build, Test, Sign & Release APK
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Source
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+          cache: gradle
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Validate Gradle Wrapper / Environment
+        run: |
+          if [ -f "./gradlew" ]; then
+            chmod +x ./gradlew
+            GRADLE_CMD="./gradlew"
+          else
+            GRADLE_CMD="gradle"
+          fi
+          echo "GRADLE_CMD=$GRADLE_CMD" >> $GITHUB_ENV
+          $GRADLE_CMD --version
+
+      - name: Run Unit & Robolectric Tests
+        run: $GRADLE_CMD :app:testDebugUnitTest --no-daemon
+
+      - name: Run Android Lint Check
+        run: $GRADLE_CMD :app:lintDebug --no-daemon
+
+      - name: Build Debug APK
+        run: $GRADLE_CMD :app:assembleDebug --no-daemon
+
+      - name: Build Release APK
+        run: $GRADLE_CMD :app:assembleRelease --no-daemon
+
+      - name: Sign Release APK (when secrets configured)
+        id: sign_apk
+        env:
+          ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+        run: |
+          mkdir -p release_out
+          DEBUG_APK=$(find app/build/outputs/apk/debug -name "*.apk" | head -n 1)
+          RELEASE_APK=$(find app/build/outputs/apk/release -name "*.apk" | head -n 1)
+
+          if [ -n "$ANDROID_KEYSTORE_BASE64" ] && [ -n "$ANDROID_KEYSTORE_PASSWORD" ] && [ -n "$ANDROID_KEY_ALIAS" ]; then
+            echo "$ANDROID_KEYSTORE_BASE64" | base64 -d > signing.jks
+            BUILD_TOOLS_DIR=$(ls -d ${ANDROID_HOME}/build-tools/* | sort -V | tail -n 1)
+            "${BUILD_TOOLS_DIR}/zipalign" -f -p 4 "$RELEASE_APK" release_out/gendev-manager-aligned.apk
+            "${BUILD_TOOLS_DIR}/apksigner" sign \
+              --ks signing.jks \
+              --ks-pass env:ANDROID_KEYSTORE_PASSWORD \
+              --ks-key-alias "$ANDROID_KEY_ALIAS" \
+              --key-pass env:ANDROID_KEY_PASSWORD \
+              --out release_out/GENDEV-MANAGER-release-signed.apk \
+              release_out/gendev-manager-aligned.apk
+            "${BUILD_TOOLS_DIR}/apksigner" verify --verbose release_out/GENDEV-MANAGER-release-signed.apk
+            rm -f signing.jks release_out/gendev-manager-aligned.apk
+            echo "apk_path=release_out/GENDEV-MANAGER-release-signed.apk" >> $GITHUB_OUTPUT
+            echo "is_signed=true" >> $GITHUB_OUTPUT
+          else
+            cp "$DEBUG_APK" release_out/GENDEV-MANAGER-debug.apk
+            if [ -n "$RELEASE_APK" ]; then
+              cp "$RELEASE_APK" release_out/GENDEV-MANAGER-release-unsigned.apk
+            fi
+            echo "apk_path=release_out/GENDEV-MANAGER-debug.apk" >> $GITHUB_OUTPUT
+            echo "is_signed=false" >> $GITHUB_OUTPUT
+            echo "Signing secrets not configured; publishing debug APK (not falsely labeled as signed production release)."
+          fi
+
+      - name: Calculate SHA-256 & Generate Release Metadata
+        id: meta
+        run: |
+          VERSION="${{ github.event.inputs.version_name || '1.0.0' }}"
+          TAG="v${VERSION}-${{ github.run_number }}"
+          APK_FILE="${{ steps.sign_apk.outputs.apk_path }}"
+          SHA256=$(sha256sum "$APK_FILE" | awk '{print $1}')
+          echo "sha256=$SHA256" >> $GITHUB_OUTPUT
+          echo "tag=$TAG" >> $GITHUB_OUTPUT
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+          python3 .github/scripts/generate_release_assets.py \
+            --version "$VERSION" \
+            --tag "$TAG" \
+            --apk-name "$(basename "$APK_FILE")" \
+            --sha256 "$SHA256" \
+            --signed "${{ steps.sign_apk.outputs.is_signed }}" \
+            --repo "${{ github.repository }}"
+
+      - name: Upload Build Reports & APK Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: gendev-manager-build-${{ github.run_number }}
+          path: |
+            release_out/*
+            release/metadata.json
+            app/build/reports/tests/
+            app/build/reports/lint-results-debug.html
+
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.meta.outputs.tag }}
+          name: "GENDEV MANAGER v${{ steps.meta.outputs.version }}"
+          body_path: release/RELEASE_NOTES.md
+          files: |
+            ${{ steps.sign_apk.outputs.apk_path }}
+            release/metadata.json
+          fail_on_unmatched_files: true

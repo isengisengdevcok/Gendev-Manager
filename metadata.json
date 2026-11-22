@@ -1,0 +1,6 @@
+{
+  "name": "GENDEV Manager",
+  "description": "Advanced Android file manager, dual-pane browser, APK & DEX/Smali engineering studio, resource/XML editor, root terminal, and AI assistant.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
