@@ -5,14 +5,19 @@ import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.junit4.createComposeRule
 import androidx.compose.ui.test.onAllNodesWithTag
 import androidx.compose.ui.test.onNodeWithTag
+import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.performScrollTo
 import androidx.test.core.app.ApplicationProvider
+import com.example.core.ai.GenDevAiRepository
 import com.example.core.common.AppContainer
+import com.example.core.data.GenDevSettings
 import com.example.core.ui.theme.GenDevManagerTheme
+import com.example.feature.ai.AiAssistantScreen
 import com.example.feature.home.HomeScreen
 import com.example.feature.resourceeditor.ResourceEditorScreen
 import kotlinx.coroutines.runBlocking
+import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Rule
 import org.junit.Test
@@ -88,5 +93,37 @@ class GenDevComposeUiTests {
         composeRule.onNodeWithTag("phone_directory_storage_bar").performClick()
         composeRule.waitForIdle()
         assertTrue(!openedPhonePath.isNullOrEmpty())
+    }
+
+    @Test
+    fun `ai assistant shows fast mode key guide and api key tester`() {
+        val container = AppContainer(context)
+        assertEquals(
+            GenDevAiRepository.MODEL_FAST,
+            container.aiRepository.resolveEffectiveGeminiModel(GenDevSettings(aiFastMode = true))
+        )
+        assertEquals(
+            GenDevAiRepository.MODEL_STANDARD,
+            container.aiRepository.resolveEffectiveGeminiModel(GenDevSettings(aiFastMode = false))
+        )
+
+        composeRule.setContent {
+            GenDevManagerTheme {
+                AiAssistantScreen(container = container)
+            }
+        }
+
+        composeRule.waitForIdle()
+        composeRule.onNodeWithTag("ai_fast_mode_chip").performScrollTo().assertIsDisplayed()
+        composeRule.onNodeWithTag("ai_key_guide_btn").performScrollTo().performClick()
+        composeRule.waitForIdle()
+        composeRule.onNodeWithText("Instruksi & Panduan API Key GENDEV AI").assertIsDisplayed()
+        composeRule.onNodeWithText("Tutup").performClick()
+        composeRule.waitForIdle()
+
+        composeRule.onNodeWithTag("ai_api_key_btn").performScrollTo().performClick()
+        composeRule.waitForIdle()
+        composeRule.onNodeWithTag("gemini_api_key_input").assertIsDisplayed()
+        composeRule.onNodeWithTag("test_ai_key_btn").performScrollTo().assertIsDisplayed()
     }
 }

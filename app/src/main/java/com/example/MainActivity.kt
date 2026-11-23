@@ -8,11 +8,15 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.consumeWindowInsets
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.ime
+import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.statusBars
 import androidx.compose.foundation.layout.windowInsetsPadding
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Android
@@ -167,6 +171,7 @@ fun GenDevRootShell(container: AppContainer) {
 
     BoxWithConstraints(modifier = Modifier.fillMaxSize()) {
         val useRail = maxWidth >= 640.dp
+        val isImeVisible = WindowInsets.ime.getBottom(LocalDensity.current) > 0
 
         Scaffold(
             contentWindowInsets = WindowInsets(0, 0, 0, 0),
@@ -206,7 +211,7 @@ fun GenDevRootShell(container: AppContainer) {
                 }
             },
             bottomBar = {
-                if (!useRail) {
+                if (!useRail && !isImeVisible) {
                     NavigationBar(modifier = Modifier.testTag("bottom_nav_bar")) {
                         primaryItems.forEach { item ->
                             NavigationBarItem(
@@ -231,6 +236,8 @@ fun GenDevRootShell(container: AppContainer) {
                 modifier = Modifier
                     .fillMaxSize()
                     .padding(innerPadding)
+                    .consumeWindowInsets(innerPadding)
+                    .imePadding()
                     .then(if (!isSecondaryRoute) Modifier.windowInsetsPadding(WindowInsets.statusBars) else Modifier)
             ) {
                 if (useRail) {

@@ -167,14 +167,21 @@ fun SettingsScreen(container: AppContainer) {
 
         item {
             GenDevGlassCard {
-                Text("GENDEV AI Engine (Firebase + Manual Key)", style = MaterialTheme.typography.titleMedium)
+                Text("GENDEV AI Engine (Cepat & Multi-Key)", style = MaterialTheme.typography.titleMedium)
                 Spacer(modifier = Modifier.height(4.dp))
                 Text(
-                    "Gunakan Firebase AI Logic otomatis atau masukkan Gemini API Key pribadi Anda untuk APK standalone.",
+                    "Gunakan Gemini API Key pribadi Anda (streaming langsung), Groq/OpenRouter/Ollama, atau Firebase AI Logic.",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
-                Spacer(modifier = Modifier.height(8.dp))
+                Spacer(modifier = Modifier.height(6.dp))
+                ToggleRow(
+                    title = "Mode Cepat AI (Streaming + Flash-Lite)",
+                    subtitle = "Prioritaskan latensi terendah & streaming kata-per-kata secara langsung",
+                    checked = settings.aiFastMode,
+                    onCheckedChange = { scope.launch { container.settingsDataStore.setAiFastMode(it) } }
+                )
+                Spacer(modifier = Modifier.height(6.dp))
                 AiProviderMode.entries.forEach { mode ->
                     Row(
                         modifier = Modifier
@@ -212,7 +219,7 @@ fun SettingsScreen(container: AppContainer) {
                     OutlinedTextField(
                         value = geminiModel,
                         onValueChange = { geminiModel = it },
-                        label = { Text("Gemini Model (contoh: gemini-2.5-flash)") },
+                        label = { Text("Gemini Model (contoh: gemini-3.5-flash-lite / gemini-3.8-flash)") },
                         singleLine = true,
                         modifier = Modifier.fillMaxWidth()
                     )

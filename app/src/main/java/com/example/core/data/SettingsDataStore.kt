@@ -15,19 +15,19 @@ private val Context.settingsDataStore by preferencesDataStore(name = "gendev_set
 enum class AiProviderMode(val label: String, val description: String) {
     FIREBASE_HYBRID(
         "Hybrid (Firebase Gemini + Auto Fallback)",
-        "Uses Firebase AI Logic when verified, or falls back to your saved Gemini API Key / Offline Analyzer."
+        "Coba Firebase AI Logic cepat; jika App Check gagal/lambat, otomatis pindah ke Gemini Key / Offline."
     ),
     GEMINI_API_KEY(
-        "Gemini API Key (Manual User Key)",
-        "Uses your personal Google AI Studio Gemini API key directly over HTTPS without App Check."
+        "Gemini API Key (Langsung & Tercepat)",
+        "Pakai Gemini API Key Google AI Studio langsung via streaming HTTPS tanpa menunggu App Check."
     ),
     CUSTOM_ENDPOINT(
-        "Custom External Provider (OpenAI-Compatible)",
-        "Uses your configured OpenAI-compatible API endpoint and personal key."
+        "Custom Provider (Groq / OpenRouter / Ollama)",
+        "Pakai endpoint OpenAI-compatible & API key pilihan Anda sendiri."
     ),
     OFFLINE_ONLY(
-        "Offline Engineering Analyzer Only",
-        "Zero network calls. Uses static analysis for Manifest, Smali, Crash Logs, and Templates."
+        "Offline Engineering Analyzer (Instan 0 ms)",
+        "Tanpa internet & tanpa key. Analisa statis Manifest, Smali, Crash Log, & Template."
     )
 }
 
@@ -46,8 +46,9 @@ data class GenDevSettings(
     val fileDisplaySize: FileDisplaySize = FileDisplaySize.STANDARD,
     val rootRememberedGranted: Boolean = false,
     val aiProviderMode: AiProviderMode = AiProviderMode.FIREBASE_HYBRID,
+    val aiFastMode: Boolean = true,
     val geminiApiKey: String = "",
-    val geminiModel: String = "gemini-2.5-flash",
+    val geminiModel: String = "gemini-3.8-flash",
     val customAiEndpoint: String = "https://api.openai.com/v1/chat/completions",
     val customAiModel: String = "gpt-4o-mini",
     val customAiApiKey: String = ""
@@ -64,6 +65,7 @@ class SettingsDataStore(private val context: Context) {
         val FILE_DISPLAY_SIZE = stringPreferencesKey("file_display_size")
         val ROOT_REMEMBERED_GRANTED = booleanPreferencesKey("root_remembered_granted")
         val AI_MODE = stringPreferencesKey("ai_mode")
+        val AI_FAST_MODE = booleanPreferencesKey("ai_fast_mode")
         val GEMINI_API_KEY = stringPreferencesKey("gemini_api_key")
         val GEMINI_MODEL = stringPreferencesKey("gemini_model")
         val CUSTOM_AI_ENDPOINT = stringPreferencesKey("custom_ai_endpoint")
@@ -85,8 +87,9 @@ class SettingsDataStore(private val context: Context) {
             rootRememberedGranted = prefs[Keys.ROOT_REMEMBERED_GRANTED] ?: false,
             aiProviderMode = prefs[Keys.AI_MODE]?.let { runCatching { AiProviderMode.valueOf(it) }.getOrNull() }
                 ?: AiProviderMode.FIREBASE_HYBRID,
+            aiFastMode = prefs[Keys.AI_FAST_MODE] ?: true,
             geminiApiKey = prefs[Keys.GEMINI_API_KEY] ?: "",
-            geminiModel = prefs[Keys.GEMINI_MODEL] ?: "gemini-2.5-flash",
+            geminiModel = prefs[Keys.GEMINI_MODEL]?.takeIf { it.isNotBlank() } ?: "gemini-3.8-flash",
             customAiEndpoint = prefs[Keys.CUSTOM_AI_ENDPOINT] ?: "https://api.openai.com/v1/chat/completions",
             customAiModel = prefs[Keys.CUSTOM_AI_MODEL] ?: "gpt-4o-mini",
             customAiApiKey = prefs[Keys.CUSTOM_AI_KEY] ?: ""
@@ -125,10 +128,14 @@ class SettingsDataStore(private val context: Context) {
         context.settingsDataStore.edit { it[Keys.AI_MODE] = mode.name }
     }
 
-    suspend fun updateGeminiKeyConfig(apiKey: String, model: String = "gemini-2.5-flash", switchToKeyMode: Boolean = true) {
+    suspend fun setAiFastMode(enabled: Boolean) {
+        context.settingsDataStore.edit { it[Keys.AI_FAST_MODE] = enabled }
+    }
+
+    suspend fun updateGeminiKeyConfig(apiKey: String, model: String = "gemini-3.8-flash", switchToKeyMode: Boolean = true) {
         context.settingsDataStore.edit {
             it[Keys.GEMINI_API_KEY] = apiKey.trim()
-            it[Keys.GEMINI_MODEL] = model.trim().ifEmpty { "gemini-2.5-flash" }
+            it[Keys.GEMINI_MODEL] = model.trim().ifEmpty { "gemini-3.8-flash" }
             if (switchToKeyMode && apiKey.isNotBlank()) {
                 it[Keys.AI_MODE] = AiProviderMode.GEMINI_API_KEY.name
             }
