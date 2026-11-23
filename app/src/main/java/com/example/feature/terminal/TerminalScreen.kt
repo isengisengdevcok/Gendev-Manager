@@ -181,14 +181,23 @@ fun TerminalScreen(container: AppContainer) {
                         )
                     }
                     Row(verticalAlignment = Alignment.CenterVertically) {
+                        val suEnabled = envInfo?.rootAvailable == true || container.rootShellManager.isRootSessionVerified
                         Text("su", style = MaterialTheme.typography.labelSmall)
                         Spacer(modifier = Modifier.width(4.dp))
                         Switch(
                             checked = activeSession.useRoot,
-                            enabled = envInfo?.rootAvailable == true,
+                            enabled = suEnabled,
                             onCheckedChange = { enable ->
                                 if (enable) {
-                                    showRootConfirmDialog = true
+                                    if (container.rootShellManager.isRootSessionVerified) {
+                                        sessions[activeIdx] = activeSession.copy(
+                                            useRoot = true,
+                                            title = "root #${activeIdx + 1}",
+                                            lines = activeSession.lines + TerminalLine("Using existing verified root (su) session.")
+                                        )
+                                    } else {
+                                        showRootConfirmDialog = true
+                                    }
                                 } else {
                                     sessions[activeIdx] = activeSession.copy(useRoot = false, title = "sh #${activeIdx + 1}")
                                 }

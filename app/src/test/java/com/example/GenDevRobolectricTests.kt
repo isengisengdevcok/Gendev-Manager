@@ -259,4 +259,109 @@ class GenDevRobolectricTests {
         assertTrue(fakeSuRes.exitCode != 0)
         assertFalse(fakeSuRes.stdout.contains("uid=0"))
     }
+
+    @Test
+    fun `archive engine extractSelected extracts only chosen entries`() = runTest {
+        val engine = ArchiveEngine()
+        val work = File(context.cacheDir, "test_sel_zip_${System.currentTimeMillis()}").apply { mkdirs() }
+        val zipFile = File(work, "multi.zip")
+        ZipOutputStream(FileOutputStream(zipFile)).use { zos ->
+            zos.putNextEntry(ZipEntry("folder/keep.txt"))
+            zos.write("kept".toByteArray())
+            zos.closeEntry()
+            zos.putNextEntry(ZipEntry("folder/skip.txt"))
+            zos.write("skipped".toByteArray())
+            zos.closeEntry()
+            zos.putNextEntry(ZipEntry("other/extra.json"))
+            zos.write("{}".toByteArray())
+            zos.closeEntry()
+        }
+
+        val outPreserve = File(work, "out_preserve")
+        val extractedCount = engine.extractSelected(
+            archiveFile = zipFile,
+            selectedPaths = setOf("folder/keep.txt"),
+            targetDir = outPreserve,
+            preserveSubdirs = true
+        ).getOrThrow()
+        assertEquals(1, extractedCount)
+        assertTrue(File(outPreserve, "folder/keep.txt").exists())
+        assertFalse(File(outPreserve, "folder/skip.txt").exists())
+        assertFalse(File(outPreserve, "other/extra.json").exists())
+
+        val outFlat = File(work, "out_flat")
+        engine.extractSelected(
+            archiveFile = zipFile,
+            selectedPaths = setOf("folder/keep.txt"),
+            targetDir = outFlat,
+            preserveSubdirs = false
+        ).getOrThrow()
+        assertTrue(File(outFlat, "keep.txt").exists())
+        work.deleteRecursively()
+    }
+
+    @Test
+    fun `dex parser patches strings recalculates checksums and generates pseudo java`() {
+        // Construct minimal valid DEX with 1 string ID slot ("HELLO_DEV")
+        val stringDataOffset = 112 + 4
+        val utf8Bytes = "HELLO_DEV".toByteArray(Charsets.UTF_8)
+        val totalSize = stringDataOffset + 1 + utf8Bytes.size + 1
+        val dexBytes = ByteArray(totalSize)
+        val magic = "dex\n035\u0000".toByteArray(Charsets.US_ASCII)
+        System.arraycopy(magic, 0, dexBytes, 0, 8)
+        val buf = ByteBuffer.wrap(dexBytes).order(ByteOrder.LITTLE_ENDIAN)
+        buf.position(32)
+        buf.putInt(totalSize) // file_size
+        buf.putInt(0x70) // header_size
+        buf.putInt(0x12345678) // endian_tag
+        buf.position(56)
+        buf.putInt(1) // string_ids_size
+        buf.putInt(112) // string_ids_off
+        buf.position(112)
+        buf.putInt(stringDataOffset)
+        dexBytes[stringDataOffset] = utf8Bytes.size.toByte()
+        System.arraycopy(utf8Bytes, 0, dexBytes, stringDataOffset + 1, utf8Bytes.size)
+        dexBytes[totalSize - 1] = 0
+
+        val parser = DexParser()
+        val withChecksums = parser.recalculateDexHeaderChecksums(dexBytes)
+        val patched = parser.patchStringInDexBytes(withChecksums, "HELLO_DEV", "PATCH_OK!").getOrThrow()
+        val reparsed = parser.parseBytes(patched, "classes.dex")
+        assertEquals(listOf("PATCH_OK!"), reparsed.strings)
+
+        // Verify failure when replacement exceeds fixed slot size
+        val tooLong = parser.patchStringInDexBytes(withChecksums, "HELLO_DEV", "LONGER_STRING_VALUE")
+        assertTrue(tooLong.isFailure)
+
+        val dummyCls = com.example.core.dex.DexClassInfo(
+            descriptor = "Lcom/gendev/Sample;",
+            className = "com.gendev.Sample",
+            packageName = "com.gendev",
+            superClassDescriptor = "Ljava/lang/Object;",
+            accessFlags = 0x0001,
+            sourceFile = "Sample.kt",
+            staticFields = emptyList(),
+            instanceFields = listOf(com.example.core.dex.DexFieldInfo("flag", "Z", 0x0002, isStatic = false)),
+            directMethods = emptyList(),
+            virtualMethods = emptyList()
+        )
+        val pseudo = parser.generatePseudoJavaPreview(reparsed, dummyCls)
+        assertTrue(pseudo.contains("package com.gendev;"))
+        assertTrue(pseudo.contains("class Sample"))
+        assertTrue(pseudo.contains("boolean flag;"))
+    }
+
+    @Test
+    fun `syntax highlighter preserves exact text length on large files`() {
+        val longText = "val item = \"hello\"\n".repeat(2500) // > 47,500 chars (> 35k threshold)
+        assertTrue(longText.length > 35_000)
+        val highlighted = com.example.core.editor.SyntaxHighlighter.highlight(
+            code = longText,
+            language = EditorLanguage.detect("Test.kt"),
+            baseColor = androidx.compose.ui.graphics.Color.White,
+            searchQuery = "item"
+        )
+        assertEquals(longText.length, highlighted.length)
+        assertEquals(longText, highlighted.text)
+    }
 }

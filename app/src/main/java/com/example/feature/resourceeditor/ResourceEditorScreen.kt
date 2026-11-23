@@ -15,6 +15,7 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
@@ -59,8 +60,12 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.OffsetMapping
+import androidx.compose.ui.text.input.TransformedText
+import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.example.core.common.AppContainer
@@ -93,7 +98,51 @@ data class OpenEditorTab(
     val isReadOnly: Boolean = false,
     val isHexMode: Boolean = false,
     val isLargeFileTruncated: Boolean = false
-)
+) {
+    override fun equals(other: Any?): Boolean {
+        if (this === other) return true
+        if (other !is OpenEditorTab) return false
+        return filePath == other.filePath &&
+            fileName == other.fileName &&
+            language == other.language &&
+            encodingLabel == other.encodingLabel &&
+            textContent == other.textContent &&
+            rawBytes.contentEquals(other.rawBytes) &&
+            undoStack == other.undoStack &&
+            redoStack == other.redoStack &&
+            isDirty == other.isDirty &&
+            isReadOnly == other.isReadOnly &&
+            isHexMode == other.isHexMode &&
+            isLargeFileTruncated == other.isLargeFileTruncated
+    }
+
+    override fun hashCode(): Int {
+        var result = filePath.hashCode()
+        result = 31 * result + textContent.hashCode()
+        result = 31 * result + rawBytes.contentHashCode()
+        result = 31 * result + isHexMode.hashCode()
+        return result
+    }
+}
+
+private class SyntaxHighlightVisualTransformation(
+    private val language: EditorLanguage,
+    private val baseColor: Color,
+    private val searchQuery: String
+) : VisualTransformation {
+    override fun filter(text: AnnotatedString): TransformedText {
+        val raw = text.text
+        val highlighted = runCatching {
+            SyntaxHighlighter.highlight(raw, language, baseColor, searchQuery)
+        }.getOrElse { AnnotatedString(raw) }
+        val safeAnnotated = if (highlighted.length == raw.length) {
+            highlighted
+        } else {
+            AnnotatedString(raw)
+        }
+        return TransformedText(safeAnnotated, OffsetMapping.Identity)
+    }
+}
 
 @Composable
 fun ResourceEditorScreen(
@@ -111,6 +160,43 @@ fun ResourceEditorScreen(
     var statusMessage by remember { mutableStateOf<String?>(null) }
     var hexEditTargetOffset by remember { mutableStateOf<Int?>(null) }
 
+    suspend fun loadFileIntoTab(path: String): OpenEditorTab? = withContext(Dispatchers.IO) {
+        runCatching {
+            val file = File(path)
+            if (!file.exists() || !file.isFile || !file.canRead()) return@withContext null
+            val maxRead = 250_000L
+            val truncated = file.length() > maxRead
+            val bytes = file.inputStream().use { inp ->
+                val targetLen = minOf(file.length().coerceAtLeast(0L), maxRead).toInt()
+                val buf = ByteArray(targetLen)
+                var readTotal = 0
+                while (readTotal < buf.size) {
+                    val r = inp.read(buf, readTotal, buf.size - readTotal)
+                    if (r <= 0) break
+                    readTotal += r
+                }
+                if (readTotal < buf.size) buf.copyOf(readTotal) else buf
+            }
+            val lang = EditorLanguage.detect(file.name, bytes)
+            val (encLabel, charset) = EncodingDetector.detectEncoding(bytes)
+            val draft = runCatching { container.database.editorDraftDao().getDraft(file.absolutePath) }.getOrNull()
+            val text = draft?.content ?: if (lang == EditorLanguage.HEX) "" else String(bytes, charset)
+            OpenEditorTab(
+                filePath = file.absolutePath,
+                fileName = file.name,
+                language = lang,
+                encodingLabel = encLabel,
+                textContent = text,
+                rawBytes = bytes,
+                isDirty = draft != null,
+                isHexMode = lang == EditorLanguage.HEX,
+                isLargeFileTruncated = truncated
+            )
+        }.onFailure { err ->
+            statusMessage = "Gagal membuka file: ${err.localizedMessage ?: "Izin/IO error"}"
+        }.getOrNull()
+    }
+
     fun openFile(path: String) {
         val existingIdx = tabs.indexOfFirst { it.filePath == path }
         if (existingIdx >= 0) {
@@ -118,57 +204,34 @@ fun ResourceEditorScreen(
             return
         }
         scope.launch {
-            val file = File(path)
-            if (!file.exists() || !file.isFile) return@launch
-            val loaded = withContext(Dispatchers.IO) {
-                val maxRead = 250_000L
-                val truncated = file.length() > maxRead
-                val bytes = file.inputStream().use { inp ->
-                    val buf = ByteArray(minOf(file.length(), maxRead).toInt())
-                    var readTotal = 0
-                    while (readTotal < buf.size) {
-                        val r = inp.read(buf, readTotal, buf.size - readTotal)
-                        if (r <= 0) break
-                        readTotal += r
-                    }
-                    if (readTotal < buf.size) buf.copyOf(readTotal) else buf
+            val loaded = loadFileIntoTab(path) ?: return@launch
+            if (tabs.none { it.filePath == loaded.filePath }) {
+                tabs.add(loaded)
+                activeTabIndex = tabs.lastIndex
+                if (loaded.isDirty) {
+                    statusMessage = "Draft auto-save dipulihkan untuk ${loaded.fileName}"
                 }
-                val lang = EditorLanguage.detect(file.name, bytes)
-                val (encLabel, charset) = EncodingDetector.detectEncoding(bytes)
-                val draft = container.database.editorDraftDao().getDraft(file.absolutePath)
-                val text = draft?.content ?: if (lang == EditorLanguage.HEX) "" else String(bytes, charset)
-                OpenEditorTab(
-                    filePath = file.absolutePath,
-                    fileName = file.name,
-                    language = lang,
-                    encodingLabel = encLabel,
-                    textContent = text,
-                    rawBytes = bytes,
-                    isDirty = draft != null,
-                    isHexMode = lang == EditorLanguage.HEX,
-                    isLargeFileTruncated = truncated
-                )
-            }
-            tabs.add(loaded)
-            activeTabIndex = tabs.lastIndex
-            if (loaded.isDirty) {
-                statusMessage = "Recovered unsaved auto-save draft for ${loaded.fileName}"
             }
         }
     }
 
     LaunchedEffect(Unit) {
-        container.storageRepository.ensureWorkspaceInitialized()
+        runCatching { container.storageRepository.ensureWorkspaceInitialized() }
         val pending = container.sharedBus.consumePendingEditorFile()
         if (pending != null) {
             openFile(pending)
         } else if (tabs.isEmpty()) {
-            val sampleXml = File(container.storageRepository.workspaceDir, "Samples/AndroidManifest_sample.xml")
-            val sampleJson = File(container.storageRepository.workspaceDir, "Samples/build_profile.json")
-            val sampleSmali = File(container.storageRepository.workspaceDir, "Samples/DemoHook.smali")
-            if (sampleXml.exists()) openFile(sampleXml.absolutePath)
-            if (sampleJson.exists()) openFile(sampleJson.absolutePath)
-            if (sampleSmali.exists()) openFile(sampleSmali.absolutePath)
+            val samplePaths = listOf(
+                File(container.storageRepository.workspaceDir, "Samples/AndroidManifest_sample.xml"),
+                File(container.storageRepository.workspaceDir, "Samples/build_profile.json"),
+                File(container.storageRepository.workspaceDir, "Samples/DemoHook.smali")
+            ).filter { it.exists() }
+            for (sample in samplePaths) {
+                if (tabs.none { it.filePath == sample.absolutePath }) {
+                    loadFileIntoTab(sample.absolutePath)?.let { tabs.add(it) }
+                }
+            }
+            if (tabs.isNotEmpty()) activeTabIndex = 0
         }
     }
 
@@ -180,6 +243,7 @@ fun ResourceEditorScreen(
                 val destDir = File(container.storageRepository.workspaceDir, "Editor_Imports")
                 container.storageRepository.importUriToDir(uri, destDir, "doc_${System.currentTimeMillis()}.txt")
                     .onSuccess { openFile(it.absolutePath) }
+                    .onFailure { statusMessage = "Gagal impor file: ${it.localizedMessage}" }
             }
         }
     }
@@ -190,13 +254,15 @@ fun ResourceEditorScreen(
             tabs[activeTabIndex] = updated
             if (!updated.isHexMode && updated.isDirty) {
                 scope.launch(Dispatchers.IO) {
-                    container.database.editorDraftDao().saveDraft(
-                        EditorDraftEntity(
-                            filePath = updated.filePath,
-                            content = updated.textContent,
-                            languageName = updated.language.name
+                    runCatching {
+                        container.database.editorDraftDao().saveDraft(
+                            EditorDraftEntity(
+                                filePath = updated.filePath,
+                                content = updated.textContent,
+                                languageName = updated.language.name
+                            )
                         )
-                    )
+                    }
                 }
             }
         }
@@ -205,7 +271,7 @@ fun ResourceEditorScreen(
     fun saveActiveTab() {
         val tab = tabs.getOrNull(activeTabIndex) ?: return
         if (tab.isReadOnly) {
-            statusMessage = "Read-only mode is enabled."
+            statusMessage = "Mode Read-Only aktif."
             return
         }
         scope.launch {
@@ -221,14 +287,16 @@ fun ResourceEditorScreen(
                     } else {
                         file.writeText(tab.textContent)
                     }
-                    container.database.editorDraftDao().clearDraft(tab.filePath)
+                    runCatching { container.database.editorDraftDao().clearDraft(tab.filePath) }
                 }
             }
             res.onSuccess {
-                tabs[activeTabIndex] = tab.copy(isDirty = false)
-                statusMessage = "Saved ${tab.fileName} (backup archived)"
+                if (activeTabIndex in tabs.indices) {
+                    tabs[activeTabIndex] = tabs[activeTabIndex].copy(isDirty = false)
+                }
+                statusMessage = "Tersimpan: ${tab.fileName} (backup tersimpan)"
             }.onFailure {
-                statusMessage = "Save error: ${it.localizedMessage}"
+                statusMessage = "Gagal menyimpan: ${it.localizedMessage}"
             }
         }
     }
@@ -307,7 +375,22 @@ fun ResourceEditorScreen(
                                 tint = if (current.isReadOnly) StatusWarning else StatusSuccess
                             )
                         }
-                        IconButton(onClick = { updateActiveTab { it.copy(isHexMode = !it.isHexMode) } }) {
+                        IconButton(
+                            onClick = {
+                                updateActiveTab { tab ->
+                                    val switchingToHex = !tab.isHexMode
+                                    val syncedBytes = if (switchingToHex && tab.rawBytes.isEmpty() && tab.textContent.isNotEmpty()) {
+                                        tab.textContent.toByteArray()
+                                    } else if (switchingToHex && !tab.isHexMode && tab.isDirty) {
+                                        tab.textContent.toByteArray()
+                                    } else {
+                                        tab.rawBytes
+                                    }
+                                    tab.copy(isHexMode = switchingToHex, rawBytes = syncedBytes)
+                                }
+                            },
+                            modifier = Modifier.testTag("editor_hex_toggle_btn")
+                        ) {
                             Icon(
                                 Icons.Filled.Hexagon,
                                 contentDescription = "Toggle Hex Mode",
@@ -315,7 +398,19 @@ fun ResourceEditorScreen(
                             )
                         }
                         IconButton(onClick = {
-                            onAskAi("Editor: ${current.fileName}", current.textContent.take(8000))
+                            val snippet = if (current.isHexMode) {
+                                HexDumpFormatter.toRows(current.rawBytes, maxBytes = 512)
+                                    .joinToString("\n") { r ->
+                                        "%06X: %s  %s".format(
+                                            r.offset,
+                                            r.bytes.joinToString(" ") { HexDumpFormatter.formatByteHex(it) },
+                                            HexDumpFormatter.formatAsciiRow(r.bytes)
+                                        )
+                                    }
+                            } else {
+                                current.textContent.take(8000)
+                            }
+                            onAskAi("Editor: ${current.fileName}", snippet)
                         }) {
                             Icon(Icons.Filled.AutoAwesome, contentDescription = "Explain with AI", tint = VioletPrimary)
                         }
@@ -356,8 +451,10 @@ fun ResourceEditorScreen(
                                     modifier = Modifier
                                         .size(14.dp)
                                         .clickable {
-                                            tabs.removeAt(idx)
-                                            activeTabIndex = activeTabIndex.coerceAtMost((tabs.size - 1).coerceAtLeast(0))
+                                            if (idx in tabs.indices) {
+                                                tabs.removeAt(idx)
+                                                activeTabIndex = activeTabIndex.coerceAtMost((tabs.size - 1).coerceAtLeast(0))
+                                            }
                                         }
                                 )
                             }
@@ -387,7 +484,7 @@ fun ResourceEditorScreen(
                         )
                         Button(onClick = {
                             val cur = tabs.getOrNull(activeTabIndex)
-                            if (cur != null && findQuery.isNotEmpty() && !cur.isReadOnly) {
+                            if (cur != null && findQuery.isNotEmpty() && !cur.isReadOnly && !cur.isHexMode) {
                                 val next = cur.textContent.replace(findQuery, replaceQuery, ignoreCase = false)
                                 updateActiveTab {
                                     it.copy(
@@ -397,7 +494,7 @@ fun ResourceEditorScreen(
                                         isDirty = true
                                     )
                                 }
-                                statusMessage = "Replaced occurrences of '$findQuery'"
+                                statusMessage = "Diganti kemunculan '$findQuery'"
                             }
                         }) {
                             Text("All")
@@ -420,8 +517,8 @@ fun ResourceEditorScreen(
         if (activeTab == null) {
             EmptyStatePanel(
                 icon = Icons.Filled.Code,
-                title = "No File Open",
-                message = "Open XML, JSON, Smali, Shell, HTML/CSS/JS, Markdown, or Binary files from Files or the folder icon above.",
+                title = "Belum Ada File Terbuka",
+                message = "Buka XML, JSON, Smali, Shell, HTML/CSS/JS, Markdown, atau Binary Hex dari File Manager atau ikon folder di atas.",
                 modifier = Modifier.weight(1f)
             )
         } else {
@@ -434,13 +531,13 @@ fun ResourceEditorScreen(
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 Text(
-                    text = "${activeTab.language.label} • ${activeTab.encodingLabel}${if (activeTab.isReadOnly) " • READ-ONLY" else ""}",
+                    text = "${if (activeTab.isHexMode) "HEX" else activeTab.language.label} • ${activeTab.encodingLabel}${if (activeTab.isReadOnly) " • READ-ONLY" else ""}",
                     style = MaterialTheme.typography.labelSmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
                 Text(
                     text = if (activeTab.isHexMode) "${activeTab.rawBytes.size} bytes"
-                    else "${activeTab.textContent.lines().size} lines",
+                    else "${activeTab.textContent.lines().size} baris",
                     style = MaterialTheme.typography.labelSmall,
                     color = CyanSecondary
                 )
@@ -450,54 +547,66 @@ fun ResourceEditorScreen(
                 val rows = remember(activeTab.rawBytes) {
                     HexDumpFormatter.toRows(activeTab.rawBytes)
                 }
-                LazyColumn(
-                    modifier = Modifier
-                        .weight(1f)
-                        .fillMaxWidth()
-                        .background(Color(0xFF070A12))
-                        .padding(8.dp)
-                ) {
-                    items(rows, key = { it.offset }) { row ->
-                        Row(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .padding(vertical = 2.dp),
-                            verticalAlignment = Alignment.CenterVertically
-                        ) {
-                            Text(
-                                text = "%06X".format(row.offset),
-                                style = MaterialTheme.typography.labelSmall,
-                                fontFamily = JetBrainsMonoFontFamily,
-                                color = VioletPrimary,
-                                modifier = Modifier.width(64.dp)
-                            )
+                if (rows.isEmpty()) {
+                    EmptyStatePanel(
+                        icon = Icons.Filled.Hexagon,
+                        title = "File Binary Kosong (0 bytes)",
+                        message = "Tidak ada byte untuk ditampilkan pada mode Hex.",
+                        modifier = Modifier.weight(1f)
+                    )
+                } else {
+                    LazyColumn(
+                        modifier = Modifier
+                            .weight(1f)
+                            .fillMaxWidth()
+                            .background(Color(0xFF070A12))
+                            .padding(8.dp)
+                            .testTag("hex_viewer_list")
+                    ) {
+                        items(rows, key = { it.offset }) { row ->
                             Row(
-                                modifier = Modifier.weight(1f).horizontalScroll(rememberScrollState()),
-                                horizontalArrangement = Arrangement.spacedBy(5.dp)
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(vertical = 3.dp),
+                                verticalAlignment = Alignment.CenterVertically
                             ) {
-                                row.bytes.forEachIndexed { idx, b ->
-                                    val absOff = row.offset + idx
-                                    Text(
-                                        text = HexDumpFormatter.formatByteHex(b),
-                                        style = MaterialTheme.typography.labelSmall,
-                                        fontFamily = JetBrainsMonoFontFamily,
-                                        color = CyanSecondary,
-                                        modifier = Modifier
-                                            .clip(RoundedCornerShape(3.dp))
-                                            .clickable(enabled = !activeTab.isReadOnly) {
-                                                hexEditTargetOffset = absOff
-                                            }
-                                            .padding(horizontal = 2.dp)
-                                    )
+                                Text(
+                                    text = "%06X".format(row.offset),
+                                    style = MaterialTheme.typography.labelSmall,
+                                    fontFamily = JetBrainsMonoFontFamily,
+                                    color = VioletPrimary,
+                                    modifier = Modifier.width(62.dp)
+                                )
+                                Row(
+                                    modifier = Modifier
+                                        .weight(1f)
+                                        .horizontalScroll(rememberScrollState()),
+                                    horizontalArrangement = Arrangement.spacedBy(5.dp)
+                                ) {
+                                    row.bytes.forEachIndexed { idx, b ->
+                                        val absOff = row.offset + idx
+                                        Text(
+                                            text = HexDumpFormatter.formatByteHex(b),
+                                            style = MaterialTheme.typography.labelSmall,
+                                            fontFamily = JetBrainsMonoFontFamily,
+                                            color = CyanSecondary,
+                                            modifier = Modifier
+                                                .clip(RoundedCornerShape(3.dp))
+                                                .clickable(enabled = !activeTab.isReadOnly) {
+                                                    hexEditTargetOffset = absOff
+                                                }
+                                                .padding(horizontal = 2.dp, vertical = 1.dp)
+                                        )
+                                    }
                                 }
+                                Spacer(modifier = Modifier.width(8.dp))
+                                Text(
+                                    text = HexDumpFormatter.formatAsciiRow(row.bytes),
+                                    style = MaterialTheme.typography.labelSmall,
+                                    fontFamily = JetBrainsMonoFontFamily,
+                                    color = Color(0xFF94A3B8)
+                                )
                             }
-                            Spacer(modifier = Modifier.width(8.dp))
-                            Text(
-                                text = HexDumpFormatter.formatAsciiRow(row.bytes),
-                                style = MaterialTheme.typography.labelSmall,
-                                fontFamily = JetBrainsMonoFontFamily,
-                                color = Color(0xFF94A3B8)
-                            )
                         }
                     }
                 }
@@ -508,17 +617,16 @@ fun ResourceEditorScreen(
                         i == 0 || !line.startsWith("    ")
                     }.joinToString("\n")
                 }
-                val lines = remember(displayText) { displayText.lines() }
-                val highlighted = remember(displayText, activeTab.language, findQuery) {
-                    SyntaxHighlighter.highlight(
-                        displayText,
-                        activeTab.language,
-                        Color(0xFFE2E8F0),
-                        findQuery
+                val linesCount = remember(displayText) { displayText.lines().size.coerceAtLeast(1) }
+                val visualTransform = remember(activeTab.language, findQuery) {
+                    SyntaxHighlightVisualTransformation(
+                        language = activeTab.language,
+                        baseColor = Color(0xFFE2E8F0),
+                        searchQuery = findQuery
                     )
                 }
 
-                Box(
+                Row(
                     modifier = Modifier
                         .weight(1f)
                         .fillMaxWidth()
@@ -526,67 +634,59 @@ fun ResourceEditorScreen(
                         .verticalScroll(rememberScrollState())
                         .padding(vertical = 8.dp)
                 ) {
-                    Row(modifier = Modifier.fillMaxWidth()) {
-                        Column(
-                            modifier = Modifier
-                                .width(44.dp)
-                                .padding(end = 8.dp),
-                            horizontalAlignment = Alignment.End
-                        ) {
-                            lines.forEachIndexed { i, _ ->
-                                Text(
-                                    text = "${i + 1}",
-                                    style = TextStyle(
-                                        fontFamily = JetBrainsMonoFontFamily,
-                                        fontSize = 12.sp,
-                                        lineHeight = 19.sp,
-                                        color = Color(0xFF475569)
-                                    )
-                                )
-                            }
-                        }
-
-                        Box(
-                            modifier = Modifier
-                                .weight(1f)
-                                .horizontalScroll(rememberScrollState())
-                                .padding(end = 12.dp)
-                        ) {
+                    Column(
+                        modifier = Modifier
+                            .width(42.dp)
+                            .padding(end = 8.dp),
+                        horizontalAlignment = Alignment.End
+                    ) {
+                        for (i in 1..linesCount) {
                             Text(
-                                text = highlighted,
+                                text = "$i",
                                 style = TextStyle(
                                     fontFamily = JetBrainsMonoFontFamily,
                                     fontSize = 12.sp,
-                                    lineHeight = 19.sp
+                                    lineHeight = 19.sp,
+                                    color = Color(0xFF475569)
                                 )
                             )
-                            if (!activeTab.isReadOnly && !codeFolded) {
-                                BasicTextField(
-                                    value = activeTab.textContent,
-                                    onValueChange = { nextVal ->
-                                        val withIndent = applyAutoIndent(activeTab.textContent, nextVal)
-                                        updateActiveTab {
-                                            it.copy(
-                                                undoStack = (it.undoStack + it.textContent).takeLast(30),
-                                                redoStack = emptyList(),
-                                                textContent = withIndent,
-                                                isDirty = true
-                                            )
-                                        }
-                                    },
-                                    textStyle = TextStyle(
-                                        fontFamily = JetBrainsMonoFontFamily,
-                                        fontSize = 12.sp,
-                                        lineHeight = 19.sp,
-                                        color = Color.Transparent
-                                    ),
-                                    cursorBrush = SolidColor(CyanSecondary),
-                                    modifier = Modifier
-                                        .fillMaxWidth()
-                                        .testTag("code_editor_input")
-                                )
-                            }
                         }
+                    }
+
+                    Box(
+                        modifier = Modifier
+                            .weight(1f)
+                            .horizontalScroll(rememberScrollState())
+                            .padding(end = 16.dp)
+                    ) {
+                        BasicTextField(
+                            value = displayText,
+                            onValueChange = { nextVal ->
+                                if (!activeTab.isReadOnly && !codeFolded) {
+                                    val withIndent = applyAutoIndent(activeTab.textContent, nextVal)
+                                    updateActiveTab {
+                                        it.copy(
+                                            undoStack = (it.undoStack + it.textContent).takeLast(30),
+                                            redoStack = emptyList(),
+                                            textContent = withIndent,
+                                            isDirty = true
+                                        )
+                                    }
+                                }
+                            },
+                            readOnly = activeTab.isReadOnly || codeFolded,
+                            visualTransformation = visualTransform,
+                            textStyle = TextStyle(
+                                fontFamily = JetBrainsMonoFontFamily,
+                                fontSize = 12.sp,
+                                lineHeight = 19.sp,
+                                color = Color(0xFFE2E8F0)
+                            ),
+                            cursorBrush = SolidColor(CyanSecondary),
+                            modifier = Modifier
+                                .widthIn(min = 340.dp)
+                                .testTag("code_editor_input")
+                        )
                     }
                 }
             }
@@ -609,7 +709,7 @@ fun ResourceEditorScreen(
                     )
                 },
                 dismissButton = {
-                    TextButton(onClick = { hexEditTargetOffset = null }) { Text("Cancel") }
+                    TextButton(onClick = { hexEditTargetOffset = null }) { Text("Batal") }
                 },
                 confirmButton = {
                     TextButton(onClick = {
@@ -620,7 +720,7 @@ fun ResourceEditorScreen(
                             updateActiveTab { it.copy(rawBytes = copy, isDirty = true) }
                             hexEditTargetOffset = null
                         }
-                    }) { Text("Apply") }
+                    }) { Text("Terapkan") }
                 }
             )
         }

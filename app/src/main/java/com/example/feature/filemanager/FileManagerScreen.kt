@@ -52,19 +52,23 @@ import androidx.compose.material.icons.filled.Terminal
 import androidx.compose.material.icons.filled.ViewColumn
 import androidx.compose.material.icons.filled.Visibility
 import androidx.compose.material.icons.filled.VisibilityOff
+import androidx.compose.material.icons.filled.FormatSize
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
-import androidx.compose.material3.FilterChip
-import androidx.compose.material3.FilterChipDefaults
+import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.RadioButton
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.material3.VerticalDivider
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -82,14 +86,11 @@ import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.example.core.common.AppContainer
+import com.example.core.data.FileDisplaySize
 import com.example.core.storage.FileCategory
 import com.example.core.storage.FileItem
-import com.example.core.ui.StatusBadgePill
 import com.example.core.ui.theme.CyanSecondary
-import com.example.core.ui.theme.EmeraldTertiary
 import com.example.core.ui.theme.StatusDanger
-import com.example.core.ui.theme.StatusSuccess
-import com.example.core.ui.theme.StatusWarning
 import java.io.File
 
 @Composable
@@ -101,7 +102,6 @@ fun FileManagerScreen(
     onOpenTerminal: (File) -> Unit
 ) {
     val uiState by viewModel.uiState.collectAsStateWithLifecycle()
-    val bookmarks by viewModel.bookmarks.collectAsStateWithLifecycle()
     val context = LocalContext.current
     val lifecycleOwner = LocalLifecycleOwner.current
 
@@ -110,6 +110,7 @@ fun FileManagerScreen(
     var showCompressDialog by remember { mutableStateOf(false) }
     var showGoToPathDialog by remember { mutableStateOf(false) }
     var showRootModeDialog by remember { mutableStateOf(false) }
+    var showDisplaySizeDialog by remember { mutableStateOf(false) }
     var showQuickAddMenu by remember { mutableStateOf(false) }
     var confirmBatchDelete by remember { mutableStateOf(false) }
     var singleDeleteTarget by remember { mutableStateOf<Pair<Int, FileItem>?>(null) }
@@ -118,6 +119,10 @@ fun FileManagerScreen(
     var imagePreviewFile by remember { mutableStateOf<File?>(null) }
     var showOverflowMenu by remember { mutableStateOf(false) }
     var pendingPhoneUnlock by remember { mutableStateOf(false) }
+
+    LaunchedEffect(Unit) {
+        viewModel.onScreenActive()
+    }
 
     fun openAllFilesPermissionSettings() {
         pendingPhoneUnlock = true
@@ -257,6 +262,28 @@ fun FileManagerScreen(
                                     onClick = { showOverflowMenu = false; showGoToPathDialog = true }
                                 )
                                 DropdownMenuItem(
+                                    text = { Text("Ukuran Tampilan File (${uiState.fileDisplaySize.label})") },
+                                    leadingIcon = { Icon(Icons.Filled.FormatSize, contentDescription = null) },
+                                    onClick = { showOverflowMenu = false; showDisplaySizeDialog = true }
+                                )
+                                DropdownMenuItem(
+                                    text = {
+                                        Text(
+                                            if (uiState.rootExplorerEnabled) "Matikan Root Explorer"
+                                            else "Aktifkan Root Explorer (su)"
+                                        )
+                                    },
+                                    leadingIcon = { Icon(Icons.Filled.Security, contentDescription = null) },
+                                    onClick = {
+                                        showOverflowMenu = false
+                                        if (uiState.rootExplorerEnabled) {
+                                            viewModel.setRootExplorerEnabled(false)
+                                        } else {
+                                            showRootModeDialog = true
+                                        }
+                                    }
+                                )
+                                DropdownMenuItem(
                                     text = { Text("Import via SAF") },
                                     leadingIcon = { Icon(Icons.Filled.FileOpen, contentDescription = null) },
                                     onClick = { showOverflowMenu = false; safImportLauncher.launch(arrayOf("*/*")) }
@@ -305,123 +332,6 @@ fun FileManagerScreen(
                                 }
                             }
                         }
-                    }
-                }
-
-                // Single Combined Scrollable Strip: Non-Root / Root Status + Quick Directories
-                val quickRoots = remember(
-                    uiState.hasAllFilesAccess,
-                    uiState.leftPane.activeTab.currentPath,
-                    uiState.rightPane.activeTab.currentPath
-                ) {
-                    container.storageRepository.getQuickRoots()
-                }
-                val rootQuickRoots = remember { container.storageRepository.getRootQuickRoots() }
-
-                Row(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .horizontalScroll(rememberScrollState()),
-                    horizontalArrangement = Arrangement.spacedBy(6.dp),
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    StatusBadgePill(
-                        label = "Kiri: Biasa",
-                        color = CyanSecondary,
-                        icon = Icons.Filled.PhoneAndroid,
-                        modifier = Modifier
-                            .clickable {
-                                viewModel.setActivePane(0)
-                                openPhoneOrWorkspace(0)
-                            }
-                            .testTag("non_root_mode_pill")
-                    )
-
-                    FilterChip(
-                        selected = uiState.rootExplorerEnabled,
-                        onClick = {
-                            if (uiState.rootExplorerEnabled) {
-                                viewModel.setActivePane(1)
-                                viewModel.navigateTo(1, "/")
-                            } else {
-                                showRootModeDialog = true
-                            }
-                        },
-                        leadingIcon = {
-                            Icon(
-                                Icons.Filled.Security,
-                                contentDescription = "Root Explorer",
-                                modifier = Modifier.size(15.dp)
-                            )
-                        },
-                        label = {
-                            Text(
-                                text = when {
-                                    uiState.rootVerifiedUid0 && uiState.rootExplorerEnabled -> "Kanan: Root (${uiState.rootImplLabel})"
-                                    uiState.rootAvailable -> "Kanan: Root (su) • Ketuk Izin"
-                                    else -> "Non-Root Device"
-                                },
-                                style = MaterialTheme.typography.labelSmall,
-                                fontWeight = FontWeight.SemiBold
-                            )
-                        },
-                        colors = FilterChipDefaults.filterChipColors(
-                            selectedContainerColor = StatusWarning.copy(alpha = 0.22f),
-                            selectedLabelColor = StatusWarning,
-                            selectedLeadingIconColor = StatusWarning
-                        ),
-                        modifier = Modifier.testTag("root_explorer_toggle_chip")
-                    )
-
-                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R && !uiState.hasAllFilesAccess) {
-                        FilterChip(
-                            selected = false,
-                            onClick = { openAllFilesPermissionSettings() },
-                            leadingIcon = {
-                                Icon(Icons.Filled.LockOpen, contentDescription = null, modifier = Modifier.size(15.dp))
-                            },
-                            label = { Text("Unlock Storage", style = MaterialTheme.typography.labelSmall) },
-                            colors = FilterChipDefaults.filterChipColors(
-                                containerColor = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.7f)
-                            ),
-                            modifier = Modifier.testTag("unlock_phone_storage_chip")
-                        )
-                    }
-
-                    quickRoots.forEach { (label, dir) ->
-                        FilterChip(
-                            selected = activePath == dir.absolutePath,
-                            onClick = { viewModel.navigateTo(uiState.activePaneIndex, dir.absolutePath) },
-                            label = { Text(label, style = MaterialTheme.typography.labelSmall) },
-                            modifier = Modifier.testTag("quick_root_${label.lowercase().replace(' ', '_')}")
-                        )
-                    }
-
-                    if (uiState.rootExplorerEnabled) {
-                        rootQuickRoots.forEach { (label, dir) ->
-                            FilterChip(
-                                selected = activePath == dir.absolutePath,
-                                onClick = {
-                                    val targetPane = if (uiState.dualPaneMode) 1 else uiState.activePaneIndex
-                                    viewModel.setActivePane(targetPane)
-                                    viewModel.navigateTo(targetPane, dir.absolutePath)
-                                },
-                                label = { Text(label, style = MaterialTheme.typography.labelSmall) },
-                                colors = FilterChipDefaults.filterChipColors(
-                                    selectedContainerColor = EmeraldTertiary.copy(alpha = 0.22f),
-                                    selectedLabelColor = EmeraldTertiary
-                                ),
-                                modifier = Modifier.testTag("root_dir_${dir.name.ifEmpty { "slash" }}")
-                            )
-                        }
-                    }
-
-                    bookmarks.forEach { bm ->
-                        FilterChip(
-                            selected = activePath == bm.path,
-                            onClick = { viewModel.navigateTo(uiState.activePaneIndex, bm.path) },
-                            label = { Text("★ ${bm.label}", style = MaterialTheme.typography.labelSmall) }
-                        )
                     }
                 }
 
@@ -569,6 +479,7 @@ fun FileManagerScreen(
                     onRequestPhoneUnlock = { openAllFilesPermissionSettings() },
                     onRequestRootEnable = { showRootModeDialog = true },
                     onOpenPhoneOrWorkspace = { openPhoneOrWorkspace(pane.paneIndex) },
+                    fileDisplaySize = uiState.fileDisplaySize,
                     modifier = paneModifier
                 )
             }
@@ -833,12 +744,63 @@ fun FileManagerScreen(
         ImagePreviewDialog(imgFile = imgFile, onDismiss = { imagePreviewFile = null })
     }
 
+    if (showDisplaySizeDialog) {
+        AlertDialog(
+            onDismissRequest = { showDisplaySizeDialog = false },
+            title = { Text("Ukuran Tampilan File") },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                    FileDisplaySize.entries.forEach { sizeOption ->
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clickable {
+                                    viewModel.updateFileDisplaySize(sizeOption)
+                                    showDisplaySizeDialog = false
+                                }
+                                .padding(vertical = 6.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            RadioButton(
+                                selected = uiState.fileDisplaySize == sizeOption,
+                                onClick = {
+                                    viewModel.updateFileDisplaySize(sizeOption)
+                                    showDisplaySizeDialog = false
+                                }
+                            )
+                            Spacer(modifier = Modifier.width(8.dp))
+                            Text(sizeOption.label, style = MaterialTheme.typography.bodyMedium)
+                        }
+                    }
+                }
+            },
+            confirmButton = {
+                TextButton(onClick = { showDisplaySizeDialog = false }) { Text("Tutup") }
+            }
+        )
+    }
+
     uiState.archiveInspectFile?.let { archive ->
+        val oppositePane = if (uiState.activePaneIndex == 0) uiState.rightPane else uiState.leftPane
         ArchiveInspectorDialog(
             archive = archive,
             entries = uiState.archiveEntries,
+            activePanePath = activeTab.currentPath,
+            oppositePanePath = oppositePane.activeTab.currentPath,
             onDismiss = { viewModel.closeArchiveInspector() },
-            onExtractAll = { viewModel.extractCurrentArchive(uiState.activePaneIndex) }
+            onOpenEntry = { entryPath ->
+                viewModel.openArchiveEntry(archive, entryPath) { extracted ->
+                    onOpenEditor(extracted.absolutePath)
+                }
+            },
+            onExtract = { selected, targetDir, extractAll, preserveSubdirs ->
+                viewModel.extractArchiveEntries(
+                    selectedPaths = selected,
+                    targetDirPath = targetDir,
+                    extractAll = extractAll,
+                    preserveSubdirs = preserveSubdirs
+                )
+            }
         )
     }
 

@@ -73,6 +73,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.example.core.common.HashUtils
+import com.example.core.data.FileDisplaySize
 import com.example.core.storage.FileCategory
 import com.example.core.storage.FileItem
 import com.example.core.storage.FilterCategory
@@ -120,11 +121,32 @@ fun FilePaneView(
     onRequestPhoneUnlock: () -> Unit,
     onRequestRootEnable: () -> Unit,
     onOpenPhoneOrWorkspace: () -> Unit,
+    fileDisplaySize: FileDisplaySize = FileDisplaySize.STANDARD,
     modifier: Modifier = Modifier
 ) {
     val tab = pane.activeTab
     var showSearchBar by remember { mutableStateOf(false) }
     var sortMenuExpanded by remember { mutableStateOf(false) }
+    val rowIconSize = when (fileDisplaySize) {
+        FileDisplaySize.COMPACT -> 20.dp
+        FileDisplaySize.STANDARD -> 26.dp
+        FileDisplaySize.LARGE -> 32.dp
+    }
+    val rowVerticalPadding = when (fileDisplaySize) {
+        FileDisplaySize.COMPACT -> 5.dp
+        FileDisplaySize.STANDARD -> 9.dp
+        FileDisplaySize.LARGE -> 12.dp
+    }
+    val titleTextStyle = when (fileDisplaySize) {
+        FileDisplaySize.COMPACT -> MaterialTheme.typography.bodySmall
+        FileDisplaySize.STANDARD -> MaterialTheme.typography.bodyMedium
+        FileDisplaySize.LARGE -> MaterialTheme.typography.titleSmall
+    }
+    val subTextStyle = when (fileDisplaySize) {
+        FileDisplaySize.COMPACT -> MaterialTheme.typography.labelSmall
+        FileDisplaySize.STANDARD -> MaterialTheme.typography.labelSmall
+        FileDisplaySize.LARGE -> MaterialTheme.typography.bodySmall
+    }
     val accent = if (isRootSide && rootExplorerEnabled) StatusWarning else CyanSecondary
     val borderColor = if (isActive) {
         accent.copy(alpha = 0.85f)
@@ -420,19 +442,19 @@ fun FilePaneView(
                                 modifier = Modifier
                                     .fillMaxWidth()
                                     .clickable { onActivate(); onNavigateUp() }
-                                    .padding(horizontal = 8.dp, vertical = 8.dp),
+                                    .padding(horizontal = 8.dp, vertical = rowVerticalPadding),
                                 verticalAlignment = Alignment.CenterVertically
                             ) {
                                 Icon(
                                     imageVector = Icons.Filled.ArrowUpward,
                                     contentDescription = "Parent Directory",
                                     tint = CyanSecondary,
-                                    modifier = Modifier.size(20.dp)
+                                    modifier = Modifier.size(rowIconSize)
                                 )
                                 Spacer(modifier = Modifier.width(8.dp))
                                 Text(
                                     text = "..",
-                                    style = MaterialTheme.typography.bodyMedium,
+                                    style = titleTextStyle,
                                     fontWeight = FontWeight.SemiBold
                                 )
                             }
@@ -468,7 +490,7 @@ fun FilePaneView(
                                         onToggleSelect(item.path)
                                     }
                                 )
-                                .padding(horizontal = 7.dp, vertical = 6.dp),
+                                .padding(horizontal = 8.dp, vertical = rowVerticalPadding),
                             verticalAlignment = Alignment.CenterVertically
                         ) {
                             Box(contentAlignment = Alignment.Center) {
@@ -476,14 +498,14 @@ fun FilePaneView(
                                     imageVector = if (isSelected) Icons.Filled.CheckCircle else categoryIcon(item.category),
                                     contentDescription = item.category.name,
                                     tint = if (isSelected) MaterialTheme.colorScheme.primary else categoryColor(item.category),
-                                    modifier = Modifier.size(21.dp)
+                                    modifier = Modifier.size(rowIconSize)
                                 )
                             }
-                            Spacer(modifier = Modifier.width(7.dp))
+                            Spacer(modifier = Modifier.width(8.dp))
                             Column(modifier = Modifier.weight(1f)) {
                                 Text(
                                     text = item.name,
-                                    style = MaterialTheme.typography.bodySmall,
+                                    style = titleTextStyle,
                                     fontWeight = if (item.isDirectory) FontWeight.Medium else FontWeight.Normal,
                                     maxLines = 1,
                                     overflow = TextOverflow.Ellipsis
@@ -500,7 +522,7 @@ fun FilePaneView(
                                 }
                                 Text(
                                     text = subText,
-                                    style = MaterialTheme.typography.labelSmall,
+                                    style = subTextStyle,
                                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                                     maxLines = 1,
                                     overflow = TextOverflow.Ellipsis

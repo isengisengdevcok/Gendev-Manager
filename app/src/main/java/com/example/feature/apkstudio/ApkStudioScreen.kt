@@ -94,6 +94,7 @@ fun ApkStudioScreen(
     var buildMetaText by remember { mutableStateOf("Built with GENDEV MANAGER") }
 
     LaunchedEffect(Unit) {
+        viewModel.ensureInitialized()
         viewModel.consumeBusIfPresent()
     }
 

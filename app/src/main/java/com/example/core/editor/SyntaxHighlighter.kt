@@ -22,8 +22,10 @@ object SyntaxHighlighter {
         baseColor: Color,
         searchQuery: String = ""
     ): AnnotatedString {
-        // Cap highlighting length for ultra-large files to stay responsive at 60fps
-        val safeCode = if (code.length > 35_000) code.substring(0, 35_000) else code
+        // Highlight up to 35_000 chars for 60fps responsiveness while keeping full length for OffsetMapping.Identity
+        val splitIdx = minOf(code.length, 35_000)
+        val safeCode = code.substring(0, splitIdx)
+        val tail = if (code.length > splitIdx) code.substring(splitIdx) else ""
         return buildAnnotatedString {
             append(safeCode)
             addStyle(SpanStyle(color = baseColor), 0, safeCode.length)
@@ -53,6 +55,12 @@ object SyntaxHighlighter {
                     )
                     idx = safeCode.indexOf(searchQuery, idx + searchQuery.length, ignoreCase = true)
                 }
+            }
+
+            if (tail.isNotEmpty()) {
+                val tailStart = length
+                append(tail)
+                addStyle(SpanStyle(color = baseColor), tailStart, length)
             }
         }
     }

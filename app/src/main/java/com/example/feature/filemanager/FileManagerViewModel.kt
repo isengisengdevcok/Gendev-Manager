@@ -6,12 +6,14 @@ import androidx.lifecycle.viewModelScope
 import com.example.core.common.AppContainer
 import com.example.core.common.HashUtils
 import com.example.core.data.BookmarkEntity
+import com.example.core.data.FileDisplaySize
 import com.example.core.data.RecentFileEntity
 import com.example.core.storage.ArchiveEntryItem
 import com.example.core.storage.DuplicateGroup
 import com.example.core.storage.FileDiffLine
 import com.example.core.storage.FileItem
 import com.example.core.storage.FilterCategory
+import com.example.core.storage.RootFileBridge
 import com.example.core.storage.SortBy
 import com.example.core.storage.StorageCategoryStat
 import kotlinx.coroutines.Dispatchers
@@ -68,11 +70,13 @@ data class FileManagerUiState(
     val activePaneIndex: Int = 0,
     val dualPaneMode: Boolean = true,
     val showHidden: Boolean = false,
+    val fileDisplaySize: FileDisplaySize = FileDisplaySize.STANDARD,
     val rootAvailable: Boolean = false,
     val suBinaryPath: String? = null,
     val rootImplLabel: String = "Non-Root",
     val rootExplorerEnabled: Boolean = false,
     val rootVerifiedUid0: Boolean = false,
+    val rootRememberedGranted: Boolean = false,
     val hasAllFilesAccess: Boolean = false,
     val statusMessage: String? = null,
     val propertiesModal: FilePropertiesModalData? = null,
@@ -125,45 +129,99 @@ class FileManagerViewModel(private val container: AppContainer) : ViewModel() {
     val bookmarks: StateFlow<List<BookmarkEntity>> = container.database.bookmarkDao().observeAll()
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
 
+    @Volatile
+    private var isScreenActivated = false
+
+    @Volatile
+    private var rootAutoAttempted = false
+
     init {
         viewModelScope.launch {
-            repo.ensureWorkspaceInitialized()
-            refreshEnvironmentState()
             container.settingsDataStore.settingsFlow.collect { s ->
-                _uiState.update { it.copy(dualPaneMode = s.dualPaneEnabled, showHidden = s.showHiddenFiles) }
+                val showHiddenChanged = _uiState.value.showHidden != s.showHiddenFiles
+                _uiState.update {
+                    it.copy(
+                        dualPaneMode = s.dualPaneEnabled,
+                        showHidden = s.showHiddenFiles,
+                        fileDisplaySize = s.fileDisplaySize,
+                        rootRememberedGranted = s.rootRememberedGranted
+                    )
+                }
+                if (isScreenActivated && showHiddenChanged) {
+                    refreshPane(0)
+                    refreshPane(1)
+                }
+            }
+        }
+    }
+
+    fun onScreenActive() {
+        val firstActivation = !isScreenActivated
+        isScreenActivated = true
+        viewModelScope.launch {
+            if (firstActivation) {
+                repo.ensureWorkspaceInitialized()
+            }
+            refreshEnvironmentState()
+        }
+    }
+
+    fun openDirectory(paneIndex: Int, path: String) {
+        isScreenActivated = true
+        setActivePane(paneIndex)
+        navigateTo(paneIndex, path)
+    }
+
+    fun refreshEnvironmentState() {
+        viewModelScope.launch {
+            val env = withContext(Dispatchers.IO) { envManager.inspectEnvironment() }
+            val sessionAlreadyVerified = rootShellManager.isRootSessionVerified || rootShellManager.isPersistentRootAlive()
+            _uiState.update { state ->
+                val verified = state.rootVerifiedUid0 || sessionAlreadyVerified
+                val effectiveRootAvailable = env.rootAvailable || verified
+                val shouldEnableRoot = if (effectiveRootAvailable && (verified || state.rootExplorerEnabled)) {
+                    true
+                } else {
+                    false
+                }
+                state.copy(
+                    rootAvailable = effectiveRootAvailable,
+                    suBinaryPath = env.suBinaryPath ?: state.suBinaryPath,
+                    rootImplLabel = if (env.rootAvailable) env.rootImplementation.displayName else state.rootImplLabel,
+                    hasAllFilesAccess = env.allFilesAccessGranted,
+                    rootExplorerEnabled = shouldEnableRoot,
+                    rootVerifiedUid0 = verified
+                )
+            }
+            val cur = _uiState.value
+            if (!rootAutoAttempted && cur.rootRememberedGranted && cur.rootAvailable && !cur.rootVerifiedUid0) {
+                rootAutoAttempted = true
+                authorizeAndEnableRoot(pointRightPaneToSlash = false, silent = true)
+            } else {
                 refreshPane(0)
                 refreshPane(1)
             }
         }
     }
 
-    fun refreshEnvironmentState() {
-        viewModelScope.launch {
-            val env = withContext(Dispatchers.IO) { envManager.inspectEnvironment() }
-            _uiState.update { state ->
-                val effectiveRootAvailable = env.rootAvailable || state.rootVerifiedUid0
-                state.copy(
-                    rootAvailable = effectiveRootAvailable,
-                    suBinaryPath = env.suBinaryPath ?: state.suBinaryPath,
-                    rootImplLabel = if (env.rootAvailable) env.rootImplementation.displayName else state.rootImplLabel,
-                    hasAllFilesAccess = env.allFilesAccessGranted,
-                    rootExplorerEnabled = if (effectiveRootAvailable) state.rootExplorerEnabled else false,
-                    rootVerifiedUid0 = if (effectiveRootAvailable) state.rootVerifiedUid0 else false
-                )
-            }
-            refreshPane(0)
-            refreshPane(1)
-        }
-    }
-
-    fun authorizeAndEnableRoot(pointRightPaneToSlash: Boolean = true) {
+    fun authorizeAndEnableRoot(pointRightPaneToSlash: Boolean = true, silent: Boolean = false) {
         val state = _uiState.value
+        if (state.rootVerifiedUid0 && rootShellManager.isPersistentRootAlive()) {
+            _uiState.update { it.copy(rootExplorerEnabled = true) }
+            if (pointRightPaneToSlash) {
+                navigateTo(1, "/")
+            } else {
+                refreshPane(1)
+            }
+            return
+        }
         viewModelScope.launch {
-            _uiState.update { it.copy(isBusy = true) }
+            if (!silent) _uiState.update { it.copy(isBusy = true) }
             val suCmd = state.suBinaryPath ?: "su"
             val result = rootShellManager.verifyRootAccess(suCmd)
             val isUid0 = result.exitCode == 0 && result.stdout.contains("uid=0")
             if (isUid0) {
+                container.settingsDataStore.setRootRememberedGranted(true)
                 val resolvedLabel = if (state.rootImplLabel == "Non-Root (Standard User)" || state.rootImplLabel == "Non-Root") {
                     "Root (su • uid=0)"
                 } else {
@@ -177,7 +235,8 @@ class FileManagerViewModel(private val container: AppContainer) : ViewModel() {
                         rootImplLabel = resolvedLabel,
                         rootVerifiedUid0 = true,
                         rootExplorerEnabled = true,
-                        statusMessage = "Root aktif ($resolvedLabel • uid=0). Panel Kanan siap untuk direktori /."
+                        rootRememberedGranted = true,
+                        statusMessage = if (silent) it.statusMessage else "Root aktif ($resolvedLabel • uid=0). Sesi su tunggal aktif."
                     )
                 }
                 if (pointRightPaneToSlash) {
@@ -193,14 +252,21 @@ class FileManagerViewModel(private val container: AppContainer) : ViewModel() {
                     refreshPane(1)
                 }
             } else {
+                if (silent) {
+                    container.settingsDataStore.setRootRememberedGranted(false)
+                }
                 val err = result.stderr.ifBlank { result.stdout }.ifBlank { "Exit code ${result.exitCode}" }
                 _uiState.update {
                     it.copy(
                         isBusy = false,
                         rootVerifiedUid0 = false,
                         rootExplorerEnabled = false,
-                        statusMessage = "Izin Root (su) ditolak atau tidak tersedia: $err"
+                        statusMessage = if (silent) it.statusMessage else "Izin Root (su) ditolak atau tidak tersedia: $err"
                     )
+                }
+                if (silent) {
+                    refreshPane(0)
+                    refreshPane(1)
                 }
             }
         }
@@ -211,8 +277,10 @@ class FileManagerViewModel(private val container: AppContainer) : ViewModel() {
             authorizeAndEnableRoot(pointRightPaneToSlash = false)
             return
         }
-        _uiState.update { it.copy(rootExplorerEnabled = false) }
-        setStatus("Root Explorer dimatikan. Mode Non-Root / SAF aktif.")
+        rootShellManager.closePersistentRootSession()
+        viewModelScope.launch { container.settingsDataStore.setRootRememberedGranted(false) }
+        _uiState.update { it.copy(rootExplorerEnabled = false, rootVerifiedUid0 = false, rootRememberedGranted = false) }
+        setStatus("Root Explorer dimatikan.")
         refreshPane(0)
         refreshPane(1)
     }
@@ -235,6 +303,11 @@ class FileManagerViewModel(private val container: AppContainer) : ViewModel() {
             refreshPane(0)
             refreshPane(1)
         }
+    }
+
+    fun updateFileDisplaySize(size: FileDisplaySize) {
+        _uiState.update { it.copy(fileDisplaySize = size) }
+        viewModelScope.launch { container.settingsDataStore.setFileDisplaySize(size) }
     }
 
     fun addTab(paneIndex: Int, path: String = repo.workspaceDir.absolutePath) {
@@ -635,23 +708,92 @@ class FileManagerViewModel(private val container: AppContainer) : ViewModel() {
         _uiState.update { it.copy(archiveInspectFile = null, archiveEntries = emptyList()) }
     }
 
-    fun extractCurrentArchive(paneIndex: Int) {
-        val archive = _uiState.value.archiveInspectFile ?: return
-        val destDir = File(getPane(paneIndex).activeTab.currentPath, archive.nameWithoutExtension)
+    fun openArchiveEntry(archive: File, entryPath: String, onReady: (File) -> Unit) {
         viewModelScope.launch {
             _uiState.update { it.copy(isBusy = true) }
-            archiveEngine.extractAll(archive, destDir)
-                .onSuccess { count ->
-                    closeArchiveInspector()
-                    setStatus("Diekstrak $count entri ke ${destDir.name}/")
-                    refreshPane(0)
-                    refreshPane(1)
-                }
-                .onFailure {
-                    _uiState.update { s -> s.copy(isBusy = false) }
-                    setStatus("Ekstraksi gagal: ${it.localizedMessage}")
-                }
+            val previewDir = File(repo.workspaceDir, "Archive_Preview/${archive.nameWithoutExtension}")
+            val res = archiveEngine.extractEntry(archive, entryPath, previewDir)
+            _uiState.update { it.copy(isBusy = false) }
+            res.onSuccess { extracted ->
+                closeArchiveInspector()
+                onReady(extracted)
+            }.onFailure {
+                setStatus("Gagal membuka entri arsip: ${it.localizedMessage}")
+            }
         }
+    }
+
+    fun extractArchiveEntries(
+        selectedPaths: Set<String>,
+        targetDirPath: String,
+        extractAll: Boolean,
+        preserveSubdirs: Boolean = true
+    ) {
+        val archive = _uiState.value.archiveInspectFile ?: return
+        val cleanTarget = targetDirPath.trim().ifEmpty { getPane(_uiState.value.activePaneIndex).activeTab.currentPath }
+        val destDir = File(cleanTarget)
+        val state = _uiState.value
+
+        viewModelScope.launch {
+            _uiState.update { it.copy(isBusy = true) }
+            val result: Result<Int> = withContext(Dispatchers.IO) {
+                val normalWritable = (destDir.exists() && destDir.canWrite()) ||
+                    (!destDir.exists() && canCreateDirectory(destDir))
+
+                if (normalWritable) {
+                    if (extractAll) {
+                        archiveEngine.extractAll(archive, destDir)
+                    } else {
+                        archiveEngine.extractSelected(archive, selectedPaths, destDir, preserveSubdirs)
+                    }
+                } else if (state.rootExplorerEnabled && !state.suBinaryPath.isNullOrBlank()) {
+                    val staging = File(repo.workspaceDir, ".zip_stage_${System.currentTimeMillis()}").apply { mkdirs() }
+                    try {
+                        val extractRes = if (extractAll) {
+                            archiveEngine.extractAll(archive, staging)
+                        } else {
+                            archiveEngine.extractSelected(archive, selectedPaths, staging, preserveSubdirs)
+                        }
+                        extractRes.fold(
+                            onSuccess = { extractedCount ->
+                                val stagedChildren = staging.listFiles()?.toList().orEmpty()
+                                if (stagedChildren.isEmpty()) {
+                                    Result.success(0)
+                                } else {
+                                    RootFileBridge.copyRoot(rootShellManager, state.suBinaryPath, stagedChildren, destDir)
+                                        .map { extractedCount }
+                                }
+                            },
+                            onFailure = { Result.failure(it) }
+                        )
+                    } finally {
+                        staging.deleteRecursively()
+                    }
+                } else {
+                    Result.failure(
+                        IllegalAccessException("Folder tujuan '${destDir.absolutePath}' tidak dapat ditulis (aktifkan Root jika folder sistem).")
+                    )
+                }
+            }
+
+            result.onSuccess { count ->
+                closeArchiveInspector()
+                setStatus("Diekstrak $count file ke ${destDir.absolutePath}")
+                refreshPane(0)
+                refreshPane(1)
+            }.onFailure { err ->
+                _uiState.update { it.copy(isBusy = false) }
+                setStatus("Ekstraksi gagal: ${err.localizedMessage}")
+            }
+        }
+    }
+
+    private fun canCreateDirectory(dir: File): Boolean {
+        var cur: File? = dir
+        while (cur != null && !cur.exists()) {
+            cur = cur.parentFile
+        }
+        return cur != null && cur.canWrite()
     }
 
     fun inspectProperties(item: FileItem) {

@@ -61,6 +61,50 @@ class ArchiveEngine {
         }
     }
 
+    suspend fun extractSelected(
+        archiveFile: File,
+        selectedPaths: Set<String>,
+        targetDir: File,
+        preserveSubdirs: Boolean = true
+    ): Result<Int> = withContext(Dispatchers.IO) {
+        runCatching {
+            require(selectedPaths.isNotEmpty()) { "Pilih minimal 1 file atau folder di dalam ZIP" }
+            if (!targetDir.exists()) targetDir.mkdirs()
+            val selectedDirs = selectedPaths.filter { it.endsWith("/") }
+            var count = 0
+            ZipFile(archiveFile).use { zip ->
+                val entries = zip.entries()
+                while (entries.hasMoreElements()) {
+                    val entry = entries.nextElement()
+                    val matched = entry.name in selectedPaths ||
+                        selectedDirs.any { dirPrefix -> entry.name.startsWith(dirPrefix) }
+                    if (!matched) continue
+
+                    val relPath = if (preserveSubdirs) {
+                        entry.name
+                    } else {
+                        entry.name.trimEnd('/').substringAfterLast('/')
+                    }
+                    if (relPath.isBlank()) continue
+
+                    val target = safeResolve(targetDir, relPath)
+                    if (entry.isDirectory) {
+                        target.mkdirs()
+                    } else {
+                        target.parentFile?.mkdirs()
+                        zip.getInputStream(entry).use { input ->
+                            FileOutputStream(target).use { output ->
+                                input.copyTo(output)
+                            }
+                        }
+                        count++
+                    }
+                }
+            }
+            count
+        }
+    }
+
     suspend fun extractAll(archiveFile: File, targetDir: File): Result<Int> =
         withContext(Dispatchers.IO) {
             runCatching {

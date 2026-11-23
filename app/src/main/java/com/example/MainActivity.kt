@@ -256,6 +256,10 @@ fun GenDevRootShell(container: AppContainer) {
                             HomeScreen(
                                 container = container,
                                 onNavigateFiles = { navigateTopLevel(GenDevRoutes.FILES) },
+                                onOpenPhoneDirectory = { phonePath ->
+                                    fileManagerVm.openDirectory(0, phonePath)
+                                    navigateTopLevel(GenDevRoutes.FILES)
+                                },
                                 onNavigateApkStudio = { navigateTopLevel(GenDevRoutes.APK_STUDIO) },
                                 onNavigateDexStudio = { navController.navigate(GenDevRoutes.DEX_STUDIO) },
                                 onNavigateEditor = { navController.navigate(GenDevRoutes.CODE_EDITOR) },

@@ -20,22 +20,23 @@ import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.OpenInNew
 import androidx.compose.material.icons.filled.Android
 import androidx.compose.material.icons.filled.AutoAwesome
 import androidx.compose.material.icons.filled.Build
 import androidx.compose.material.icons.filled.Code
-import androidx.compose.material.icons.filled.DeveloperBoard
 import androidx.compose.material.icons.filled.FolderCopy
 import androidx.compose.material.icons.filled.Memory
+import androidx.compose.material.icons.filled.PhoneAndroid
 import androidx.compose.material.icons.filled.Security
 import androidx.compose.material.icons.filled.Shield
-import androidx.compose.material.icons.filled.Storage
 import androidx.compose.material.icons.filled.Terminal
 import androidx.compose.material3.Icon
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -66,6 +67,7 @@ import com.example.core.ui.SectionHeaderRow
 import com.example.core.ui.StatusBadgePill
 import com.example.core.ui.theme.CyanSecondary
 import com.example.core.ui.theme.EmeraldTertiary
+import com.example.core.ui.theme.JetBrainsMonoFontFamily
 import com.example.core.ui.theme.StatusInfo
 import com.example.core.ui.theme.StatusSuccess
 import com.example.core.ui.theme.StatusWarning
@@ -77,6 +79,7 @@ import kotlinx.coroutines.withContext
 fun HomeScreen(
     container: AppContainer,
     onNavigateFiles: () -> Unit,
+    onOpenPhoneDirectory: (String) -> Unit,
     onNavigateApkStudio: () -> Unit,
     onNavigateDexStudio: () -> Unit,
     onNavigateEditor: () -> Unit,
@@ -84,7 +87,10 @@ fun HomeScreen(
     onNavigateAi: () -> Unit,
     onNavigateTools: () -> Unit
 ) {
-    var envInfo by remember { mutableStateOf<DeviceEnvironmentInfo?>(null) }
+    // Immediate zero-latency preview so cold start lands instantaneously on Home
+    var envInfo by remember {
+        mutableStateOf(container.deviceEnvironmentManager.inspectFastPreview())
+    }
     val recentFiles by container.database.recentFileDao().observeRecent().collectAsStateWithLifecycle(emptyList())
     val recentApks by container.database.recentFileDao().observeRecentApks().collectAsStateWithLifecycle(emptyList())
     val buildStatus by container.sharedBus.lastBuildStatus.collectAsStateWithLifecycle()
@@ -94,6 +100,10 @@ fun HomeScreen(
             container.storageRepository.ensureWorkspaceInitialized()
             envInfo = container.deviceEnvironmentManager.inspectEnvironment()
         }
+    }
+
+    val phoneRootPath = remember {
+        container.storageRepository.getPhoneStorageDirectory()?.absolutePath ?: "/storage/emulated/0"
     }
 
     LazyColumn(
@@ -113,6 +123,15 @@ fun HomeScreen(
         }
 
         item {
+            PhoneDirectoryStorageCard(
+                info = envInfo,
+                phonePath = phoneRootPath,
+                onOpenPhoneDir = { onOpenPhoneDirectory(phoneRootPath) },
+                onInspectTools = onNavigateTools
+            )
+        }
+
+        item {
             SectionHeaderRow(
                 title = "Engineering Suite",
                 subtitle = "Universal Android Studio & Dual-Pane Control"
@@ -122,7 +141,7 @@ fun HomeScreen(
                 Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
                     QuickActionTile(
                         title = "Dual-Pane Files",
-                        subtitle = "Tabs, SAF, ZIP & Diff",
+                        subtitle = "Biasa | Root (su) & ZIP",
                         icon = Icons.Filled.FolderCopy,
                         accent = CyanSecondary,
                         onClick = onNavigateFiles,
@@ -144,7 +163,7 @@ fun HomeScreen(
                 Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
                     QuickActionTile(
                         title = "DEX & Smali",
-                        subtitle = "Disassemble & XRefs",
+                        subtitle = "Multi-DEX, Decompile & Patch",
                         icon = Icons.Filled.Memory,
                         accent = VioletPrimary,
                         onClick = onNavigateDexStudio,
@@ -176,7 +195,7 @@ fun HomeScreen(
                     )
                     QuickActionTile(
                         title = "GENDEV AI",
-                        subtitle = "Hybrid Gemini + Local",
+                        subtitle = "Firebase + Gemini Key",
                         icon = Icons.Filled.AutoAwesome,
                         accent = VioletPrimary,
                         onClick = onNavigateAi,
@@ -185,12 +204,6 @@ fun HomeScreen(
                             .testTag("quick_ai_btn")
                     )
                 }
-            }
-        }
-
-        item {
-            envInfo?.let { info ->
-                StorageAndDeviceCard(info = info, onInspectTools = onNavigateTools)
             }
         }
 
@@ -225,7 +238,7 @@ fun HomeScreen(
                                 style = MaterialTheme.typography.titleMedium
                             )
                             Text(
-                                text = "Samples/GENDEV_Manager_self.apk is pre-staged in Workspace for instant AXML & DEX engineering.",
+                                text = "Ketuk untuk membuka APK Studio (self APK atau aplikasi terpasang).",
                                 style = MaterialTheme.typography.bodySmall,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant
                             )
@@ -280,7 +293,7 @@ fun HomeScreen(
                 EmptyStatePanel(
                     icon = Icons.Filled.FolderCopy,
                     title = "No Recent Files Yet",
-                    message = "Open files from the Dual-Pane File Manager or Workspace Samples to see them here."
+                    message = "Buka file dari Dual-Pane File Manager atau Direktori Phone."
                 )
             } else {
                 Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -332,7 +345,7 @@ fun HomeScreen(
 
 @Composable
 private fun HeroBannerCard(
-    envInfo: DeviceEnvironmentInfo?,
+    envInfo: DeviceEnvironmentInfo,
     buildStatus: String,
     onOpenAi: () -> Unit,
     onOpenFiles: () -> Unit
@@ -348,13 +361,13 @@ private fun HeroBannerCard(
             contentDescription = "GENDEV Manager Engineering Hero Banner",
             modifier = Modifier
                 .fillMaxWidth()
-                .height(210.dp),
+                .height(198.dp),
             contentScale = ContentScale.Crop
         )
         Box(
             modifier = Modifier
                 .fillMaxWidth()
-                .height(210.dp)
+                .height(198.dp)
                 .background(
                     Brush.verticalGradient(
                         listOf(
@@ -364,7 +377,7 @@ private fun HeroBannerCard(
                         )
                     )
                 )
-                .padding(18.dp)
+                .padding(16.dp)
         ) {
             Column(
                 modifier = Modifier.fillMaxSize(),
@@ -389,9 +402,9 @@ private fun HeroBannerCard(
                         )
                     }
                     StatusBadgePill(
-                        label = if (envInfo?.rootAvailable == true) envInfo.rootImplementation.displayName else "Non-Root Safe",
-                        color = if (envInfo?.rootAvailable == true) StatusSuccess else CyanSecondary,
-                        icon = if (envInfo?.rootAvailable == true) Icons.Filled.Security else Icons.Filled.Shield
+                        label = if (envInfo.rootAvailable) envInfo.rootImplementation.displayName else "Non-Root Safe",
+                        color = if (envInfo.rootAvailable) StatusSuccess else CyanSecondary,
+                        icon = if (envInfo.rootAvailable) Icons.Filled.Security else Icons.Filled.Shield
                     )
                 }
 
@@ -404,7 +417,7 @@ private fun HeroBannerCard(
                         color = StatusInfo,
                         icon = Icons.Filled.Build
                     )
-                    if (envInfo?.shizukuInstalled == true) {
+                    if (envInfo.shizukuInstalled) {
                         StatusBadgePill(label = "Shizuku", color = EmeraldTertiary)
                     }
                 }
@@ -453,53 +466,86 @@ private fun HeroBannerCard(
 }
 
 @Composable
-private fun StorageAndDeviceCard(
+private fun PhoneDirectoryStorageCard(
     info: DeviceEnvironmentInfo,
+    phonePath: String,
+    onOpenPhoneDir: () -> Unit,
     onInspectTools: () -> Unit
 ) {
-    GenDevGlassCard(onClick = onInspectTools) {
+    val usedPct = (info.internalStorage.usedFraction.coerceIn(0f, 1f) * 100f).toInt()
+    GenDevGlassCard(
+        accentBorder = CyanSecondary.copy(alpha = 0.45f),
+        onClick = onOpenPhoneDir
+    ) {
         Row(
             modifier = Modifier.fillMaxWidth(),
             horizontalArrangement = Arrangement.SpaceBetween,
             verticalAlignment = Alignment.CenterVertically
         ) {
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Icon(Icons.Filled.Storage, contentDescription = "Storage", tint = CyanSecondary)
+            Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.weight(1f)) {
+                Icon(Icons.Filled.PhoneAndroid, contentDescription = "Direktori Phone", tint = CyanSecondary)
                 Spacer(modifier = Modifier.width(8.dp))
-                Text("Device & Storage Matrix", style = MaterialTheme.typography.titleMedium)
+                Column {
+                    Text("Direktori Phone", style = MaterialTheme.typography.titleMedium)
+                    Text(
+                        text = phonePath,
+                        style = MaterialTheme.typography.labelSmall,
+                        fontFamily = JetBrainsMonoFontFamily,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                }
             }
-            Text(
-                text = info.primaryArchitecture,
-                style = MaterialTheme.typography.labelMedium,
-                color = MaterialTheme.colorScheme.primary
-            )
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text(
+                    text = "$usedPct%",
+                    style = MaterialTheme.typography.labelLarge,
+                    color = CyanSecondary
+                )
+                Spacer(modifier = Modifier.width(6.dp))
+                Icon(
+                    Icons.AutoMirrored.Filled.OpenInNew,
+                    contentDescription = "Buka Direktori Phone",
+                    tint = CyanSecondary,
+                    modifier = Modifier.size(18.dp)
+                )
+            }
         }
         Spacer(modifier = Modifier.height(10.dp))
         LinearProgressIndicator(
             progress = { info.internalStorage.usedFraction.coerceIn(0f, 1f) },
             modifier = Modifier
                 .fillMaxWidth()
-                .height(8.dp)
-                .clip(RoundedCornerShape(4.dp)),
+                .height(10.dp)
+                .clip(RoundedCornerShape(5.dp))
+                .clickable(onClick = onOpenPhoneDir)
+                .testTag("phone_directory_storage_bar"),
             color = CyanSecondary,
             trackColor = MaterialTheme.colorScheme.surfaceVariant
         )
         Spacer(modifier = Modifier.height(8.dp))
         KeyValueRow(
-            label = "Internal Storage",
-            value = "${HashUtils.formatBytes(info.internalStorage.usedBytes)} / ${HashUtils.formatBytes(info.internalStorage.totalBytes)} (${HashUtils.formatBytes(info.internalStorage.freeBytes)} free)"
+            label = "Penyimpanan Terpakai",
+            value = "${HashUtils.formatBytes(info.internalStorage.usedBytes)} / ${HashUtils.formatBytes(info.internalStorage.totalBytes)} (${HashUtils.formatBytes(info.internalStorage.freeBytes)} bebas)"
         )
         KeyValueRow(
-            label = "Device / OS",
-            value = "${info.manufacturer} ${info.model} • Android ${info.androidVersion} (API ${info.sdkLevel})"
+            label = "Perangkat",
+            value = "${info.manufacturer} ${info.model} • Android ${info.androidVersion} (${info.primaryArchitecture})"
         )
-        KeyValueRow(
-            label = "ABIs Supported",
-            value = info.supportedAbis.joinToString(", ")
-        )
-        KeyValueRow(
-            label = "Memory (RAM)",
-            value = "${HashUtils.formatBytes(info.availableRamBytes)} avail / ${HashUtils.formatBytes(info.totalRamBytes)}"
-        )
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Text(
+                text = "Ketuk kartu/bar untuk buka Direktori Phone",
+                style = MaterialTheme.typography.labelSmall,
+                color = CyanSecondary
+            )
+            TextButton(onClick = onInspectTools) {
+                Text("Detail Device", style = MaterialTheme.typography.labelSmall)
+            }
+        }
     }
 }

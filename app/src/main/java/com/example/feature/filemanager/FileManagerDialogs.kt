@@ -1,6 +1,7 @@
 package com.example.feature.filemanager
 
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
@@ -9,14 +10,24 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Folder
+import androidx.compose.material.icons.filled.OpenInNew
 import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.Button
+import androidx.compose.material3.Checkbox
 import androidx.compose.material3.FilterChip
+import androidx.compose.material3.HorizontalDivider
+import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -25,6 +36,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
@@ -427,43 +439,205 @@ fun ImagePreviewDialog(
 fun ArchiveInspectorDialog(
     archive: File,
     entries: List<ArchiveEntryItem>,
+    activePanePath: String,
+    oppositePanePath: String,
     onDismiss: () -> Unit,
-    onExtractAll: () -> Unit
+    onOpenEntry: (String) -> Unit,
+    onExtract: (selectedPaths: Set<String>, targetDirPath: String, extractAll: Boolean, preserveSubdirs: Boolean) -> Unit
 ) {
+    var search by remember { mutableStateOf("") }
+    var selectedPaths by remember(archive.absolutePath) { mutableStateOf(emptySet<String>()) }
+    var targetDirPath by remember(archive.absolutePath, oppositePanePath) {
+        mutableStateOf(oppositePanePath)
+    }
+    var preserveSubdirs by remember { mutableStateOf(true) }
+
+    val filteredEntries = remember(entries, search) {
+        val list = if (search.isBlank()) entries else entries.filter { it.path.contains(search, ignoreCase = true) }
+        list.take(300)
+    }
+
+    val subfolderDefault = remember(activePanePath, archive.nameWithoutExtension) {
+        val base = if (activePanePath == "/") "" else activePanePath.trimEnd('/')
+        "$base/${archive.nameWithoutExtension}"
+    }
+
     AlertDialog(
         onDismissRequest = onDismiss,
-        title = { Text("Archive: ${archive.name} (${entries.size})") },
+        title = {
+            Column {
+                Text(
+                    text = archive.name,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
+                )
+                Text(
+                    text = "${entries.size} entri • ${selectedPaths.size} dipilih",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = CyanSecondary
+                )
+            }
+        },
         text = {
-            LazyColumn(modifier = Modifier.height(300.dp)) {
-                items(entries.take(200)) { entry ->
-                    Row(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .padding(vertical = 4.dp),
-                        horizontalArrangement = Arrangement.SpaceBetween
-                    ) {
-                        Text(
-                            text = entry.path,
-                            style = MaterialTheme.typography.labelSmall,
-                            modifier = Modifier.weight(1f),
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis
-                        )
-                        Text(
-                            text = if (entry.isDirectory) "DIR" else HashUtils.formatBytes(entry.sizeBytes),
-                            style = MaterialTheme.typography.labelSmall,
-                            color = MaterialTheme.colorScheme.primary
+            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                OutlinedTextField(
+                    value = search,
+                    onValueChange = { search = it },
+                    label = { Text("Cari file/folder dalam arsip") },
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth()
+                )
+
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .horizontalScroll(rememberScrollState()),
+                    horizontalArrangement = Arrangement.spacedBy(6.dp)
+                ) {
+                    FilterChip(
+                        selected = selectedPaths.size == entries.size && entries.isNotEmpty(),
+                        onClick = {
+                            selectedPaths = if (selectedPaths.size == entries.size) emptySet()
+                            else entries.map { it.path }.toSet()
+                        },
+                        label = { Text(if (selectedPaths.size == entries.size) "Batal Semua" else "Pilih Semua", style = MaterialTheme.typography.labelSmall) }
+                    )
+                    if (selectedPaths.isNotEmpty()) {
+                        FilterChip(
+                            selected = false,
+                            onClick = { selectedPaths = emptySet() },
+                            label = { Text("Reset (${selectedPaths.size})", style = MaterialTheme.typography.labelSmall) }
                         )
                     }
+                }
+
+                LazyColumn(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(210.dp)
+                        .clip(RoundedCornerShape(8.dp))
+                        .background(MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.35f))
+                ) {
+                    items(filteredEntries, key = { it.path }) { entry ->
+                        val checked = entry.path in selectedPaths
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clickable {
+                                    selectedPaths = if (checked) selectedPaths - entry.path else selectedPaths + entry.path
+                                }
+                                .padding(horizontal = 4.dp, vertical = 2.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Checkbox(
+                                checked = checked,
+                                onCheckedChange = { isChecked ->
+                                    selectedPaths = if (isChecked) selectedPaths + entry.path else selectedPaths - entry.path
+                                }
+                            )
+                            if (entry.isDirectory) {
+                                Icon(
+                                    Icons.Filled.Folder,
+                                    contentDescription = null,
+                                    tint = StatusWarning,
+                                    modifier = Modifier.size(16.dp)
+                                )
+                                Spacer(modifier = Modifier.width(6.dp))
+                            }
+                            Column(modifier = Modifier.weight(1f)) {
+                                Text(
+                                    text = entry.path,
+                                    style = MaterialTheme.typography.labelMedium,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis
+                                )
+                                Text(
+                                    text = if (entry.isDirectory) "Folder" else HashUtils.formatBytes(entry.sizeBytes),
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                            }
+                            if (!entry.isDirectory) {
+                                TextButton(onClick = { onOpenEntry(entry.path) }) {
+                                    Icon(Icons.Filled.OpenInNew, contentDescription = "Lihat / Edit", modifier = Modifier.size(15.dp))
+                                }
+                            }
+                        }
+                        HorizontalDivider(thickness = 0.4.dp, color = MaterialTheme.colorScheme.outline.copy(alpha = 0.14f))
+                    }
+                }
+
+                Text(
+                    text = "Extract To (Direktori Tujuan):",
+                    style = MaterialTheme.typography.labelMedium,
+                    fontWeight = FontWeight.SemiBold,
+                    color = MaterialTheme.colorScheme.primary
+                )
+
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .horizontalScroll(rememberScrollState()),
+                    horizontalArrangement = Arrangement.spacedBy(6.dp)
+                ) {
+                    FilterChip(
+                        selected = targetDirPath == oppositePanePath,
+                        onClick = { targetDirPath = oppositePanePath },
+                        label = { Text("Panel Sebelah", style = MaterialTheme.typography.labelSmall) },
+                        modifier = Modifier.testTag("zip_dest_opposite_chip")
+                    )
+                    FilterChip(
+                        selected = targetDirPath == activePanePath,
+                        onClick = { targetDirPath = activePanePath },
+                        label = { Text("Panel Aktif", style = MaterialTheme.typography.labelSmall) },
+                        modifier = Modifier.testTag("zip_dest_active_chip")
+                    )
+                    FilterChip(
+                        selected = targetDirPath == subfolderDefault,
+                        onClick = { targetDirPath = subfolderDefault },
+                        label = { Text("Subfolder ZIP", style = MaterialTheme.typography.labelSmall) }
+                    )
+                }
+
+                OutlinedTextField(
+                    value = targetDirPath,
+                    onValueChange = { targetDirPath = it },
+                    label = { Text("Path tujuan kustom") },
+                    singleLine = true,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .testTag("extract_to_path_input")
+                )
+
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clickable { preserveSubdirs = !preserveSubdirs },
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Checkbox(checked = preserveSubdirs, onCheckedChange = { preserveSubdirs = it })
+                    Text("Pertahankan struktur subfolder", style = MaterialTheme.typography.labelSmall)
                 }
             }
         },
         dismissButton = {
-            TextButton(onClick = onDismiss) { Text("Close") }
+            Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                TextButton(onClick = onDismiss) { Text("Tutup") }
+                OutlinedButton(
+                    onClick = { onExtract(emptySet(), targetDirPath, true, true) },
+                    modifier = Modifier.testTag("zip_extract_all_btn")
+                ) {
+                    Text("Ekstrak Semua")
+                }
+            }
         },
         confirmButton = {
-            TextButton(onClick = onExtractAll) {
-                Text("Extract All")
+            Button(
+                enabled = selectedPaths.isNotEmpty() && targetDirPath.isNotBlank(),
+                onClick = { onExtract(selectedPaths, targetDirPath, false, preserveSubdirs) },
+                modifier = Modifier.testTag("zip_extract_selected_btn")
+            ) {
+                Text("Ekstrak Terpilih (${selectedPaths.size})")
             }
         }
     )

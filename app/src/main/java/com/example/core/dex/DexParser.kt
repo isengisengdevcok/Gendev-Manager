@@ -3,6 +3,8 @@ package com.example.core.dex
 import java.io.File
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
+import java.security.MessageDigest
+import java.util.zip.Adler32
 import java.util.zip.ZipFile
 
 data class DexHeaderInfo(
@@ -78,6 +80,40 @@ data class DexReferenceHit(
 )
 
 class DexParser {
+
+    fun listDexEntriesInApk(apkFile: File): List<String> = runCatching {
+        ZipFile(apkFile).use { zip ->
+            zip.entries().asSequence()
+                .map { it.name }
+                .filter { it.endsWith(".dex", ignoreCase = true) && !it.contains('/') }
+                .sortedWith(
+                    compareBy<String> { it != "classes.dex" }
+                        .thenBy { it.removePrefix("classes").removeSuffix(".dex").toIntOrNull() ?: 999 }
+                        .thenBy { it }
+                )
+                .toList()
+        }
+    }.getOrDefault(emptyList())
+
+    fun parseFromFile(file: File, dexEntryName: String = "classes.dex"): Result<DexParsedFile> =
+        if (file.extension.equals("dex", ignoreCase = true)) {
+            runCatching { parseBytes(file.readBytes(), file.name) }
+        } else {
+            parseFromApk(file, dexEntryName)
+        }
+
+    fun extractDexBytes(file: File, dexEntryName: String = "classes.dex"): Result<ByteArray> =
+        runCatching {
+            if (file.extension.equals("dex", ignoreCase = true)) {
+                file.readBytes()
+            } else {
+                ZipFile(file).use { zip ->
+                    val entry = zip.getEntry(dexEntryName)
+                        ?: error("DEX entry '$dexEntryName' not found in ${file.name}")
+                    zip.getInputStream(entry).use { it.readBytes() }
+                }
+            }
+        }
 
     fun parseFromApk(apkFile: File, dexEntryName: String = "classes.dex"): Result<DexParsedFile> =
         runCatching {
@@ -367,6 +403,185 @@ class DexParser {
         return sb.toString().trimEnd()
     }
 
+    fun generatePseudoJavaPreview(dex: DexParsedFile, cls: DexClassInfo): String {
+        val sb = StringBuilder()
+        if (cls.packageName != "(default)") {
+            sb.append("package ").append(cls.packageName).append(";\n\n")
+        }
+        val simpleName = cls.className.substringAfterLast('.')
+        val superSimple = cls.superClassDescriptor?.let { descriptorToReadable(it) }
+        sb.append("// Source: ").append(cls.sourceFile ?: "unknown").append('\n')
+        sb.append(formatAccessFlags(cls.accessFlags, isField = false))
+        sb.append("class ").append(simpleName)
+        if (!superSimple.isNullOrBlank() && superSimple != "java.lang.Object") {
+            sb.append(" extends ").append(superSimple)
+        }
+        sb.append(" {\n\n")
+
+        if (cls.staticFields.isNotEmpty()) {
+            sb.append("    // Static Fields\n")
+            cls.staticFields.forEach { f ->
+                sb.append("    ").append(f.accessString).append(f.readableType).append(' ').append(f.name).append(";\n")
+            }
+            sb.append('\n')
+        }
+        if (cls.instanceFields.isNotEmpty()) {
+            sb.append("    // Instance Fields\n")
+            cls.instanceFields.forEach { f ->
+                sb.append("    ").append(f.accessString).append(f.readableType).append(' ').append(f.name).append(";\n")
+            }
+            sb.append('\n')
+        }
+
+        cls.allMethods.forEach { m ->
+            val paramsStr = m.paramTypes.mapIndexed { idx, t -> "${descriptorToReadable(t)} p$idx" }.joinToString(", ")
+            sb.append("    ").append(m.accessString).append(descriptorToReadable(m.returnType))
+                .append(' ').append(m.name).append('(').append(paramsStr).append(')')
+            if (m.codeInsns.isEmpty()) {
+                sb.append(";\n\n")
+                return@forEach
+            }
+            sb.append(" {\n")
+            val smaliLines = disassembleMethodInsns(dex, m.codeInsns)
+            var lastConst = ""
+            var emitted = 0
+            for (line in smaliLines) {
+                if (emitted >= 60) {
+                    sb.append("        // ... (${smaliLines.size - emitted} more instructions in Smali tab)\n")
+                    break
+                }
+                when {
+                    line.startsWith("const-string") -> {
+                        val lit = line.substringAfter(", ", "\"\"")
+                        lastConst = lit
+                        sb.append("        String str = ").append(lit).append(";\n")
+                        emitted++
+                    }
+                    line.startsWith("new-instance") -> {
+                        val type = descriptorToReadable(line.substringAfter(", ").trim())
+                        sb.append("        var obj = new ").append(type).append("();\n")
+                        emitted++
+                    }
+                    line.startsWith("invoke-") -> {
+                        val sig = line.substringAfter("}, ").trim()
+                        val owner = descriptorToReadable(sig.substringBefore("->")).substringAfterLast('.')
+                        val methodPart = sig.substringAfter("->").substringBefore("(")
+                        val argHint = if (lastConst.isNotEmpty() && line.contains("Ljava/lang/String;")) lastConst else "..."
+                        sb.append("        ").append(owner).append('.').append(methodPart).append("(").append(argHint).append(");\n")
+                        lastConst = ""
+                        emitted++
+                    }
+                    line.startsWith("iget") || line.startsWith("sget") -> {
+                        val sig = line.substringAfterLast(", ").trim()
+                        val fieldName = sig.substringAfter("->").substringBefore(":")
+                        sb.append("        val _").append(fieldName).append(" = this.").append(fieldName).append(";\n")
+                        emitted++
+                    }
+                    line.startsWith("iput") || line.startsWith("sput") -> {
+                        val sig = line.substringAfterLast(", ").trim()
+                        val fieldName = sig.substringAfter("->").substringBefore(":")
+                        sb.append("        this.").append(fieldName).append(" = reg;\n")
+                        emitted++
+                    }
+                    line.startsWith("if-") -> {
+                        val op = line.substringBefore(" ")
+                        val target = line.substringAfterLast(", ")
+                        sb.append("        if (").append(op).append(") goto ").append(target).append(";\n")
+                        emitted++
+                    }
+                    line.startsWith("return-void") -> {
+                        sb.append("        return;\n")
+                        emitted++
+                    }
+                    line.startsWith("return") -> {
+                        val reg = line.substringAfter(" ", "res")
+                        sb.append("        return ").append(reg).append(";\n")
+                        emitted++
+                    }
+                    line.startsWith("throw") -> {
+                        sb.append("        throw exception;\n")
+                        emitted++
+                    }
+                }
+            }
+            if (emitted == 0) {
+                sb.append("        // ").append(smaliLines.size).append(" Dalvik bytecode instructions\n")
+            }
+            sb.append("    }\n\n")
+        }
+        sb.append("}\n")
+        return sb.toString()
+    }
+
+    fun patchStringInDexBytes(
+        bytes: ByteArray,
+        targetString: String,
+        replacementString: String
+    ): Result<ByteArray> = runCatching {
+        require(bytes.size >= 112) { "Invalid DEX binary" }
+        require(targetString.isNotEmpty()) { "Target string cannot be empty" }
+        val patched = bytes.copyOf()
+        val buf = ByteBuffer.wrap(patched).order(ByteOrder.LITTLE_ENDIAN)
+        buf.position(56)
+        val stringIdsSize = buf.int
+        val stringIdsOff = buf.int
+
+        val replacementUtf8 = replacementString.toByteArray(Charsets.UTF_8)
+        var replacedCount = 0
+
+        for (i in 0 until stringIdsSize) {
+            val ptrPos = stringIdsOff + i * 4
+            if (ptrPos + 4 > patched.size) break
+            buf.position(ptrPos)
+            val dataOff = buf.int
+            if (dataOff <= 0 || dataOff >= patched.size) continue
+
+            var pos = dataOff
+            // Skip ULEB128 utf16 size
+            while (pos < patched.size) {
+                val b = patched[pos++].toInt() and 0xFF
+                if ((b and 0x80) == 0) break
+            }
+            val start = pos
+            while (pos < patched.size && patched[pos].toInt() != 0) {
+                pos++
+            }
+            val existingUtf8Len = (pos - start).coerceAtLeast(0)
+            val existingStr = String(patched, start, existingUtf8Len, Charsets.UTF_8)
+            if (existingStr == targetString) {
+                require(replacementUtf8.size <= existingUtf8Len) {
+                    "Replacement UTF-8 (${replacementUtf8.size}B) exceeds slot capacity ($existingUtf8Len B). Use equal or shorter text to keep DEX offsets valid."
+                }
+                System.arraycopy(replacementUtf8, 0, patched, start, replacementUtf8.size)
+                for (k in (start + replacementUtf8.size) until pos) {
+                    patched[k] = 0x20.toByte() // space pad inside fixed MUTF-8 slot
+                }
+                patched[pos] = 0
+                replacedCount++
+            }
+        }
+
+        require(replacedCount > 0) { "String '$targetString' not found in DEX string pool" }
+        recalculateDexHeaderChecksums(patched)
+    }
+
+    fun recalculateDexHeaderChecksums(bytes: ByteArray): ByteArray {
+        require(bytes.size >= 112) { "DEX too small for header checksum update" }
+        val out = bytes.copyOf()
+        // 1. Update SHA-1 signature [offset 12..32) computed over bytes[32..end)
+        val sha1 = MessageDigest.getInstance("SHA-1")
+        sha1.update(out, 32, out.size - 32)
+        val digest = sha1.digest()
+        System.arraycopy(digest, 0, out, 12, 20)
+
+        // 2. Update Adler32 checksum [offset 8..12) computed over bytes[12..end)
+        val adler = Adler32()
+        adler.update(out, 12, out.size - 12)
+        val checksum = adler.value.toInt()
+        ByteBuffer.wrap(out, 8, 4).order(ByteOrder.LITTLE_ENDIAN).putInt(checksum)
+        return out
+    }
+
     fun findReferences(dex: DexParsedFile, query: String, maxHits: Int = 80): List<DexReferenceHit> {
         if (query.isBlank()) return emptyList()
         val hits = mutableListOf<DexReferenceHit>()
@@ -423,11 +638,21 @@ class DexParser {
                     pc += 1
                 }
                 0x01 -> { out.add("move v${hi and 0xF}, v${(hi ushr 4) and 0xF}"); pc += 1 }
+                0x02 -> { val src = insns.getOrElse(pc + 1) { 0 }; out.add("move/from16 v$hi, v$src"); pc += 2 }
+                0x03 -> { out.add("move/16 v${insns.getOrElse(pc + 1) { 0 }}, v${insns.getOrElse(pc + 2) { 0 }}"); pc += 3 }
+                0x04 -> { out.add("move-wide v${hi and 0xF}, v${(hi ushr 4) and 0xF}"); pc += 1 }
+                0x05 -> { out.add("move-wide/from16 v$hi, v${insns.getOrElse(pc + 1) { 0 }}"); pc += 2 }
+                0x06 -> { out.add("move-wide/16 v${insns.getOrElse(pc + 1) { 0 }}, v${insns.getOrElse(pc + 2) { 0 }}"); pc += 3 }
+                0x07 -> { out.add("move-object v${hi and 0xF}, v${(hi ushr 4) and 0xF}"); pc += 1 }
+                0x08 -> { out.add("move-object/from16 v$hi, v${insns.getOrElse(pc + 1) { 0 }}"); pc += 2 }
+                0x09 -> { out.add("move-object/16 v${insns.getOrElse(pc + 1) { 0 }}, v${insns.getOrElse(pc + 2) { 0 }}"); pc += 3 }
                 0x0a -> { out.add("move-result v$hi"); pc += 1 }
+                0x0b -> { out.add("move-result-wide v$hi"); pc += 1 }
                 0x0c -> { out.add("move-result-object v$hi"); pc += 1 }
                 0x0d -> { out.add("move-exception v$hi"); pc += 1 }
                 0x0e -> { out.add("return-void"); pc += 1 }
                 0x0f -> { out.add("return v$hi"); pc += 1 }
+                0x10 -> { out.add("return-wide v$hi"); pc += 1 }
                 0x11 -> { out.add("return-object v$hi"); pc += 1 }
                 0x12 -> {
                     val reg = hi and 0xF
@@ -445,17 +670,51 @@ class DexParser {
                     out.add("const v$hi, 0x%x".format(v))
                     pc += 3
                 }
+                0x15 -> {
+                    val v = insns.getOrElse(pc + 1) { 0 } shl 16
+                    out.add("const/high16 v$hi, 0x%x".format(v))
+                    pc += 2
+                }
+                0x16 -> {
+                    val lit = insns.getOrElse(pc + 1) { 0 }.toShort().toLong()
+                    out.add("const-wide/16 v$hi, ${lit}L")
+                    pc += 2
+                }
+                0x17 -> {
+                    val v = if (pc + 2 < insns.size) (insns[pc + 1].toLong() or (insns[pc + 2].toLong() shl 16)) else 0L
+                    out.add("const-wide/32 v$hi, 0x%xL".format(v))
+                    pc += 3
+                }
+                0x18 -> {
+                    val low = if (pc + 2 < insns.size) (insns[pc + 1].toLong() and 0xFFFFL) or ((insns[pc + 2].toLong() and 0xFFFFL) shl 16) else 0L
+                    val high = if (pc + 4 < insns.size) (insns[pc + 3].toLong() and 0xFFFFL) or ((insns[pc + 4].toLong() and 0xFFFFL) shl 16) else 0L
+                    out.add("const-wide v$hi, 0x%xL".format(low or (high shl 32)))
+                    pc += 5
+                }
+                0x19 -> {
+                    val v = insns.getOrElse(pc + 1) { 0 }.toLong() shl 48
+                    out.add("const-wide/high16 v$hi, 0x%xL".format(v))
+                    pc += 2
+                }
                 0x1a -> {
                     val strIdx = if (pc + 1 < insns.size) insns[pc + 1] else 0
                     val s = dex.strings.getOrNull(strIdx).orEmpty().replace("\"", "\\\"").replace("\n", "\\n")
                     out.add("const-string v$hi, \"$s\"")
                     pc += 2
                 }
+                0x1b -> {
+                    val strIdx = if (pc + 2 < insns.size) (insns[pc + 1] or (insns[pc + 2] shl 16)) else 0
+                    val s = dex.strings.getOrNull(strIdx).orEmpty().replace("\"", "\\\"").replace("\n", "\\n")
+                    out.add("const-string/jumbo v$hi, \"$s\"")
+                    pc += 3
+                }
                 0x1c -> {
                     val tIdx = if (pc + 1 < insns.size) insns[pc + 1] else 0
                     out.add("const-class v$hi, ${dex.types.getOrNull(tIdx) ?: "Lunknown;"}")
                     pc += 2
                 }
+                0x1d -> { out.add("monitor-enter v$hi"); pc += 1 }
+                0x1e -> { out.add("monitor-exit v$hi"); pc += 1 }
                 0x1f -> {
                     val tIdx = if (pc + 1 < insns.size) insns[pc + 1] else 0
                     out.add("check-cast v$hi, ${dex.types.getOrNull(tIdx) ?: "Lunknown;"}")
@@ -466,9 +725,15 @@ class DexParser {
                     out.add("instance-of v${hi and 0xF}, v${(hi ushr 4) and 0xF}, ${dex.types.getOrNull(tIdx) ?: "Lunknown;"}")
                     pc += 2
                 }
+                0x21 -> { out.add("array-length v${hi and 0xF}, v${(hi ushr 4) and 0xF}"); pc += 1 }
                 0x22 -> {
                     val tIdx = if (pc + 1 < insns.size) insns[pc + 1] else 0
                     out.add("new-instance v$hi, ${dex.types.getOrNull(tIdx) ?: "Lunknown;"}")
+                    pc += 2
+                }
+                0x23 -> {
+                    val tIdx = if (pc + 1 < insns.size) insns[pc + 1] else 0
+                    out.add("new-array v${hi and 0xF}, v${(hi ushr 4) and 0xF}, ${dex.types.getOrNull(tIdx) ?: "[Ljava/lang/Object;"}")
                     pc += 2
                 }
                 0x27 -> { out.add("throw v$hi"); pc += 1 }
@@ -476,6 +741,25 @@ class DexParser {
                     val off = hi.toByte().toInt()
                     out.add("goto :offset_${pc + off}")
                     pc += 1
+                }
+                0x29 -> {
+                    val off = insns.getOrElse(pc + 1) { 0 }.toShort().toInt()
+                    out.add("goto/16 :offset_${pc + off}")
+                    pc += 2
+                }
+                0x2a -> {
+                    val off = if (pc + 2 < insns.size) (insns[pc + 1] or (insns[pc + 2] shl 16)) else 0
+                    out.add("goto/32 :offset_${pc + off}")
+                    pc += 3
+                }
+                in 0x2d..0x31 -> {
+                    val name = when (opcode) {
+                        0x2d -> "cmpl-float"; 0x2e -> "cmpg-float"; 0x2f -> "cmpl-double"
+                        0x30 -> "cmpg-double"; else -> "cmp-long"
+                    }
+                    val w = insns.getOrElse(pc + 1) { 0 }
+                    out.add("$name v$hi, v${w and 0xFF}, v${(w ushr 8) and 0xFF}")
+                    pc += 2
                 }
                 in 0x32..0x37 -> {
                     val name = when (opcode) {
@@ -495,11 +779,23 @@ class DexParser {
                     out.add("$name v$hi, :cond_${pc + off}")
                     pc += 2
                 }
+                in 0x44..0x51 -> {
+                    val name = when (opcode) {
+                        0x44 -> "aget"; 0x45 -> "aget-wide"; 0x46 -> "aget-object"; 0x47 -> "aget-boolean"
+                        0x48 -> "aget-byte"; 0x49 -> "aget-char"; 0x4a -> "aget-short"
+                        0x4b -> "aput"; 0x4c -> "aput-wide"; 0x4d -> "aput-object"; 0x4e -> "aput-boolean"
+                        0x4f -> "aput-byte"; 0x50 -> "aput-char"; else -> "aput-short"
+                    }
+                    val w = insns.getOrElse(pc + 1) { 0 }
+                    out.add("$name v$hi, v${w and 0xFF}, v${(w ushr 8) and 0xFF}")
+                    pc += 2
+                }
                 in 0x52..0x5f -> {
                     val opName = when (opcode) {
-                        0x52 -> "iget"; 0x54 -> "iget-object"; 0x55 -> "iget-boolean"
-                        0x59 -> "iput"; 0x5b -> "iput-object"; 0x5c -> "iput-boolean"
-                        else -> "field-op-0x%02x".format(opcode)
+                        0x52 -> "iget"; 0x53 -> "iget-wide"; 0x54 -> "iget-object"; 0x55 -> "iget-boolean"
+                        0x56 -> "iget-byte"; 0x57 -> "iget-char"; 0x58 -> "iget-short"
+                        0x59 -> "iput"; 0x5a -> "iput-wide"; 0x5b -> "iput-object"; 0x5c -> "iput-boolean"
+                        0x5d -> "iput-byte"; 0x5e -> "iput-char"; else -> "iput-short"
                     }
                     val fIdx = if (pc + 1 < insns.size) insns[pc + 1] else 0
                     val fSig = dex.fieldsTable.getOrNull(fIdx) ?: "field@$fIdx"
@@ -508,9 +804,10 @@ class DexParser {
                 }
                 in 0x60..0x6d -> {
                     val opName = when (opcode) {
-                        0x60 -> "sget"; 0x62 -> "sget-object"; 0x63 -> "sget-boolean"
-                        0x67 -> "sput"; 0x69 -> "sput-object"; 0x6a -> "sput-boolean"
-                        else -> "sfield-op-0x%02x".format(opcode)
+                        0x60 -> "sget"; 0x61 -> "sget-wide"; 0x62 -> "sget-object"; 0x63 -> "sget-boolean"
+                        0x64 -> "sget-byte"; 0x65 -> "sget-char"; 0x66 -> "sget-short"
+                        0x67 -> "sput"; 0x68 -> "sput-wide"; 0x69 -> "sput-object"; 0x6a -> "sput-boolean"
+                        0x6b -> "sput-byte"; 0x6c -> "sput-char"; else -> "sput-short"
                     }
                     val fIdx = if (pc + 1 < insns.size) insns[pc + 1] else 0
                     val fSig = dex.fieldsTable.getOrNull(fIdx) ?: "field@$fIdx"
@@ -539,6 +836,71 @@ class DexParser {
                     val mSig = dex.methodsTable.getOrNull(mIdx) ?: "method@$mIdx"
                     out.add("$opName {$regs}, $mSig")
                     pc += 3
+                }
+                in 0x74..0x78 -> {
+                    val opName = when (opcode) {
+                        0x74 -> "invoke-virtual/range"
+                        0x75 -> "invoke-super/range"
+                        0x76 -> "invoke-direct/range"
+                        0x77 -> "invoke-static/range"
+                        else -> "invoke-interface/range"
+                    }
+                    val mIdx = insns.getOrElse(pc + 1) { 0 }
+                    val startReg = insns.getOrElse(pc + 2) { 0 }
+                    val endReg = (startReg + hi - 1).coerceAtLeast(startReg)
+                    val mSig = dex.methodsTable.getOrNull(mIdx) ?: "method@$mIdx"
+                    val rangeStr = if (hi == 0) "" else if (hi == 1) "v$startReg" else "v$startReg .. v$endReg"
+                    out.add("$opName {$rangeStr}, $mSig")
+                    pc += 3
+                }
+                in 0x7b..0x8f -> {
+                    val opName = when (opcode) {
+                        0x7b -> "neg-int"; 0x7c -> "not-int"; 0x7d -> "neg-long"; 0x7e -> "not-long"
+                        0x7f -> "neg-float"; 0x80 -> "neg-double"; 0x81 -> "int-to-long"; 0x82 -> "int-to-float"
+                        0x83 -> "int-to-double"; 0x84 -> "long-to-int"; 0x85 -> "long-to-float"; 0x86 -> "long-to-double"
+                        0x87 -> "float-to-int"; 0x88 -> "float-to-long"; 0x89 -> "float-to-double"; 0x8a -> "double-to-int"
+                        0x8b -> "double-to-long"; 0x8c -> "double-to-float"; 0x8d -> "int-to-byte"; 0x8e -> "int-to-char"
+                        else -> "int-to-short"
+                    }
+                    out.add("$opName v${hi and 0xF}, v${(hi ushr 4) and 0xF}")
+                    pc += 1
+                }
+                in 0x90..0xaf -> {
+                    val opName = when (opcode) {
+                        0x90 -> "add-int"; 0x91 -> "sub-int"; 0x92 -> "mul-int"; 0x93 -> "div-int"
+                        0x94 -> "rem-int"; 0x95 -> "and-int"; 0x96 -> "or-int"; 0x97 -> "xor-int"
+                        0x98 -> "shl-int"; 0x99 -> "shr-int"; 0x9a -> "ushr-int"
+                        0x9b -> "add-long"; 0x9c -> "sub-long"; 0x9d -> "mul-long"; 0x9e -> "div-long"
+                        0xa6 -> "add-float"; 0xa7 -> "sub-float"; 0xa8 -> "mul-float"; 0xa9 -> "div-float"
+                        0xab -> "add-double"; 0xac -> "sub-double"; 0xad -> "mul-double"; 0xae -> "div-double"
+                        else -> "binop-0x%02x".format(opcode)
+                    }
+                    val w = insns.getOrElse(pc + 1) { 0 }
+                    out.add("$opName v$hi, v${w and 0xFF}, v${(w ushr 8) and 0xFF}")
+                    pc += 2
+                }
+                in 0xb0..0xcf -> {
+                    val base = when ((opcode - 0xb0) % 11) {
+                        0 -> "add"; 1 -> "sub"; 2 -> "mul"; 3 -> "div"; 4 -> "rem"
+                        5 -> "and"; 6 -> "or"; 7 -> "xor"; 8 -> "shl"; 9 -> "shr"; else -> "ushr"
+                    }
+                    out.add("$base/2addr v${hi and 0xF}, v${(hi ushr 4) and 0xF}")
+                    pc += 1
+                }
+                in 0xd0..0xe2 -> {
+                    val opName = when (opcode) {
+                        0xd0 -> "add-int/lit16"; 0xd1 -> "rsub-int"; 0xd2 -> "mul-int/lit16"
+                        0xd8 -> "add-int/lit8"; 0xd9 -> "rsub-int/lit8"; 0xda -> "mul-int/lit8"
+                        0xdb -> "div-int/lit8"; 0xdd -> "and-int/lit8"; 0xde -> "or-int/lit8"
+                        else -> "litop-0x%02x".format(opcode)
+                    }
+                    val w = insns.getOrElse(pc + 1) { 0 }
+                    if (opcode <= 0xd7) {
+                        out.add("$opName v${hi and 0xF}, v${(hi ushr 4) and 0xF}, ${w.toShort().toInt()}")
+                    } else {
+                        out.add("$opName v$hi, v${w and 0xFF}, ${(w ushr 8).toByte().toInt()}")
+                    }
+                    pc += 2
                 }
                 else -> {
                     val width = opcodeWidth(opcode)

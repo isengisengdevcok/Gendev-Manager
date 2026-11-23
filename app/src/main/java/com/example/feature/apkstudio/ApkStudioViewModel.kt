@@ -39,23 +39,32 @@ class ApkStudioViewModel(private val container: AppContainer) : ViewModel() {
     private val _uiState = MutableStateFlow(ApkStudioUiState())
     val uiState: StateFlow<ApkStudioUiState> = _uiState.asStateFlow()
 
-    init {
+    @Volatile
+    private var initialized = false
+
+    fun ensureInitialized() {
+        val pending = container.sharedBus.consumePendingApk()
+        if (pending != null) {
+            initialized = true
+            inspectApkPath(pending)
+            return
+        }
+        if (initialized || _uiState.value.activeApk != null) return
+        initialized = true
         viewModelScope.launch {
             storageRepo.ensureWorkspaceInitialized()
-            val pending = container.sharedBus.consumePendingApk()
-            if (pending != null) {
-                inspectApkPath(pending)
-            } else {
-                val selfApk = File(storageRepo.workspaceDir, "Samples/GENDEV_Manager_self.apk")
-                if (selfApk.exists()) {
-                    inspectApkPath(selfApk.absolutePath)
-                }
+            val selfApk = storageRepo.ensureSelfApkSample()
+            if (selfApk != null && selfApk.exists() && _uiState.value.activeApk == null) {
+                inspectApkPath(selfApk.absolutePath)
             }
         }
     }
 
     fun consumeBusIfPresent() {
-        container.sharedBus.consumePendingApk()?.let { inspectApkPath(it) }
+        container.sharedBus.consumePendingApk()?.let {
+            initialized = true
+            inspectApkPath(it)
+        }
     }
 
     fun inspectApkPath(path: String) {
