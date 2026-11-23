@@ -4,11 +4,15 @@ import android.content.Context
 import android.net.Uri
 import android.os.Environment
 import com.example.core.common.HashUtils
+import com.example.core.root.RootShellManager
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import java.io.File
 
-class StorageRepository(private val context: Context) {
+class StorageRepository(
+    private val context: Context,
+    private val rootShellManager: RootShellManager = RootShellManager()
+) {
 
     val workspaceDir: File
         get() = File(context.filesDir, "GENDEV_Workspace").apply { mkdirs() }
@@ -111,20 +115,40 @@ df -h /data
         }
     }
 
+    fun getPhoneStorageDirectory(): File? =
+        runCatching { Environment.getExternalStorageDirectory() }.getOrNull()
+
     fun getQuickRoots(): List<Pair<String, File>> {
-        val roots = mutableListOf(
-            "Workspace" to workspaceDir,
-            "App Cache" to context.cacheDir
-        )
+        val roots = mutableListOf<Pair<String, File>>()
+        val sdcard = getPhoneStorageDirectory()
+        if (sdcard != null && sdcard.exists() && sdcard.canRead()) {
+            roots.add("Phone Storage" to sdcard)
+            val downloadDir = File(sdcard, "Download")
+            if (downloadDir.exists() && downloadDir.isDirectory && downloadDir.canRead()) {
+                roots.add("Download" to downloadDir)
+            }
+            val docsDir = File(sdcard, "Documents")
+            if (docsDir.exists() && docsDir.isDirectory && docsDir.canRead()) {
+                roots.add("Documents" to docsDir)
+            }
+        }
+        roots.add("Workspace" to workspaceDir)
+        roots.add("Samples" to File(workspaceDir, "Samples").apply { mkdirs() })
+        roots.add("App Cache" to context.cacheDir)
         context.getExternalFilesDir(null)?.let {
             roots.add("App External" to it)
         }
-        val sdcard = Environment.getExternalStorageDirectory()
-        if (sdcard != null && sdcard.exists() && sdcard.canRead()) {
-            roots.add("Internal Storage" to sdcard)
-        }
         return roots
     }
+
+    fun getRootQuickRoots(): List<Pair<String, File>> = listOf(
+        "/ (Root)" to File("/"),
+        "/data/local/tmp" to File("/data/local/tmp"),
+        "/data" to File("/data"),
+        "/system" to File("/system"),
+        "/vendor" to File("/vendor"),
+        "/sdcard" to File("/sdcard")
+    )
 
     suspend fun listDirectory(
         dir: File,
@@ -132,16 +156,30 @@ df -h /data
         sortBy: SortBy = SortBy.NAME,
         ascending: Boolean = true,
         filterCategory: FilterCategory = FilterCategory.ALL,
-        query: String = ""
+        query: String = "",
+        useRoot: Boolean = false,
+        suBinary: String? = null
     ): List<FileItem> = withContext(Dispatchers.IO) {
-        if (!dir.exists() || !dir.isDirectory || !dir.canRead()) {
-            return@withContext emptyList()
+        val rawItems: List<FileItem> = if (dir.exists() && dir.isDirectory && dir.canRead()) {
+            dir.listFiles()?.toList().orEmpty()
+                .asSequence()
+                .filter { showHidden || !it.name.startsWith(".") }
+                .map { file -> toFileItem(file) }
+                .toList()
+        } else if (useRoot && suBinary != null) {
+            RootFileBridge.listDirectoryRoot(
+                shell = rootShellManager,
+                suBinary = suBinary,
+                dirPath = dir.absolutePath,
+                showHidden = showHidden,
+                categorizer = ::categorizeExtension
+            ).getOrDefault(emptyList())
+        } else {
+            emptyList()
         }
-        val children = dir.listFiles()?.toList().orEmpty()
-        children
+
+        rawItems
             .asSequence()
-            .filter { showHidden || !it.name.startsWith(".") }
-            .map { file -> toFileItem(file) }
             .filter { item ->
                 if (query.isNotBlank() && !item.name.contains(query, ignoreCase = true)) {
                     return@filter false
@@ -229,7 +267,16 @@ df -h /data
         }
     }
 
-    suspend fun copyFiles(sources: List<File>, targetDir: File): Result<Int> = withContext(Dispatchers.IO) {
+    suspend fun copyFiles(
+        sources: List<File>,
+        targetDir: File,
+        useRoot: Boolean = false,
+        suBinary: String? = null
+    ): Result<Int> = withContext(Dispatchers.IO) {
+        val needsRoot = !targetDir.canWrite() || sources.any { !it.canRead() }
+        if (needsRoot && useRoot && suBinary != null) {
+            return@withContext RootFileBridge.copyRoot(rootShellManager, suBinary, sources, targetDir)
+        }
         runCatching {
             if (!targetDir.exists()) targetDir.mkdirs()
             var count = 0
@@ -246,7 +293,16 @@ df -h /data
         }
     }
 
-    suspend fun moveFiles(sources: List<File>, targetDir: File): Result<Int> = withContext(Dispatchers.IO) {
+    suspend fun moveFiles(
+        sources: List<File>,
+        targetDir: File,
+        useRoot: Boolean = false,
+        suBinary: String? = null
+    ): Result<Int> = withContext(Dispatchers.IO) {
+        val needsRoot = !targetDir.canWrite() || sources.any { !it.canRead() || it.parentFile?.canWrite() != true }
+        if (needsRoot && useRoot && suBinary != null) {
+            return@withContext RootFileBridge.moveRoot(rootShellManager, suBinary, sources, targetDir)
+        }
         runCatching {
             if (!targetDir.exists()) targetDir.mkdirs()
             var count = 0
@@ -268,7 +324,15 @@ df -h /data
         }
     }
 
-    suspend fun renameFile(file: File, newName: String): Result<File> = withContext(Dispatchers.IO) {
+    suspend fun renameFile(
+        file: File,
+        newName: String,
+        useRoot: Boolean = false,
+        suBinary: String? = null
+    ): Result<File> = withContext(Dispatchers.IO) {
+        if (file.parentFile?.canWrite() != true && useRoot && suBinary != null) {
+            return@withContext RootFileBridge.renameRoot(rootShellManager, suBinary, file, newName)
+        }
         runCatching {
             val clean = newName.trim()
             require(clean.isNotEmpty() && !clean.contains('/')) { "Invalid filename" }
@@ -279,7 +343,16 @@ df -h /data
         }
     }
 
-    suspend fun deleteFiles(files: List<File>, createBackup: Boolean = true): Result<Int> = withContext(Dispatchers.IO) {
+    suspend fun deleteFiles(
+        files: List<File>,
+        createBackup: Boolean = true,
+        useRoot: Boolean = false,
+        suBinary: String? = null
+    ): Result<Int> = withContext(Dispatchers.IO) {
+        val needsRoot = files.any { it.parentFile?.canWrite() != true }
+        if (needsRoot && useRoot && suBinary != null) {
+            return@withContext RootFileBridge.deleteRoot(rootShellManager, suBinary, files)
+        }
         runCatching {
             var count = 0
             for (f in files) {
@@ -294,7 +367,15 @@ df -h /data
         }
     }
 
-    suspend fun createFolder(parent: File, name: String): Result<File> = withContext(Dispatchers.IO) {
+    suspend fun createFolder(
+        parent: File,
+        name: String,
+        useRoot: Boolean = false,
+        suBinary: String? = null
+    ): Result<File> = withContext(Dispatchers.IO) {
+        if (!parent.canWrite() && useRoot && suBinary != null) {
+            return@withContext RootFileBridge.mkdirRoot(rootShellManager, suBinary, parent, name)
+        }
         runCatching {
             val clean = name.trim()
             require(clean.isNotEmpty() && !clean.contains('/')) { "Invalid folder name" }
@@ -305,7 +386,16 @@ df -h /data
         }
     }
 
-    suspend fun createFile(parent: File, name: String, initialContent: String = ""): Result<File> = withContext(Dispatchers.IO) {
+    suspend fun createFile(
+        parent: File,
+        name: String,
+        initialContent: String = "",
+        useRoot: Boolean = false,
+        suBinary: String? = null
+    ): Result<File> = withContext(Dispatchers.IO) {
+        if (!parent.canWrite() && useRoot && suBinary != null) {
+            return@withContext RootFileBridge.touchRoot(rootShellManager, suBinary, parent, name)
+        }
         runCatching {
             val clean = name.trim()
             require(clean.isNotEmpty() && !clean.contains('/')) { "Invalid file name" }
@@ -313,6 +403,37 @@ df -h /data
             require(!file.exists()) { "File already exists" }
             file.writeText(initialContent)
             file
+        }
+    }
+
+    suspend fun chmodRoot(
+        file: File,
+        octalMode: String,
+        suBinary: String
+    ): Result<Unit> = withContext(Dispatchers.IO) {
+        RootFileBridge.chmodRoot(rootShellManager, suBinary, file, octalMode)
+    }
+
+    suspend fun calculateRootSha256(file: File, suBinary: String): String = withContext(Dispatchers.IO) {
+        RootFileBridge.sha256Root(rootShellManager, suBinary, file)
+    }
+
+    suspend fun readRootPreview(file: File, suBinary: String): String? = withContext(Dispatchers.IO) {
+        RootFileBridge.readPreviewRoot(rootShellManager, suBinary, file)
+    }
+
+    suspend fun stageReadableCopyIfNeeded(
+        file: File,
+        useRoot: Boolean,
+        suBinary: String?
+    ): Result<File> = withContext(Dispatchers.IO) {
+        if (file.exists() && file.canRead()) {
+            Result.success(file)
+        } else if (useRoot && suBinary != null) {
+            val stagingDir = File(context.cacheDir, "root_staging").apply { mkdirs() }
+            RootFileBridge.stageFileToCache(rootShellManager, suBinary, file, stagingDir)
+        } else {
+            Result.failure(IllegalAccessException("File requires Root Explorer or storage permission: ${file.name}"))
         }
     }
 

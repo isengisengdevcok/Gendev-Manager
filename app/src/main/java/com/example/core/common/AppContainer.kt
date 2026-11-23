@@ -19,7 +19,7 @@ class AppContainer(context: Context) {
     val settingsDataStore: SettingsDataStore by lazy { SettingsDataStore(appContext) }
     val deviceEnvironmentManager: DeviceEnvironmentManager by lazy { DeviceEnvironmentManager(appContext) }
     val rootShellManager: RootShellManager by lazy { RootShellManager() }
-    val storageRepository: StorageRepository by lazy { StorageRepository(appContext) }
+    val storageRepository: StorageRepository by lazy { StorageRepository(appContext, rootShellManager) }
     val archiveEngine: ArchiveEngine by lazy { ArchiveEngine() }
     val apkSignerEngine: ApkSignerEngine by lazy { ApkSignerEngine(appContext) }
     val apkEngineeringEngine: ApkEngineeringEngine by lazy {

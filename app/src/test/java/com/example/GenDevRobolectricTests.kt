@@ -181,4 +181,51 @@ class GenDevRobolectricTests {
         val (enc, _) = EncodingDetector.detectEncoding("hello".toByteArray())
         assertNotNull(enc)
     }
+
+    @Test
+    fun `root file bridge parses ls lines quotes safely and exposes root quick roots`() {
+        val repo = StorageRepository(context)
+        val rootRoots = repo.getRootQuickRoots()
+        assertTrue(rootRoots.any { it.second.absolutePath == "/" })
+        assertTrue(rootRoots.any { it.second.absolutePath == "/data/local/tmp" })
+        assertTrue(rootRoots.any { it.second.absolutePath == "/system" })
+
+        assertEquals("'hello'\\''world'", com.example.core.storage.RootFileBridge.shellQuote("hello'world"))
+
+        val dirItem = com.example.core.storage.RootFileBridge.parseLsLine(
+            parentPath = "/system",
+            rawLine = "drwxr-xr-x 15 root root 4096 2025-01-12 08:30 my apps",
+            categorizer = repo::categorizeExtension
+        )
+        assertNotNull(dirItem)
+        assertTrue(dirItem!!.isDirectory)
+        assertEquals("/system/my apps", dirItem.path)
+        assertEquals("drwxr-xr-x", dirItem.rawPermissions)
+
+        val fileItem = com.example.core.storage.RootFileBridge.parseLsLine(
+            parentPath = "/data/local/tmp",
+            rawLine = "-rw-r--r-- 1 shell shell 2048 2025-02-01 12:00 base.apk",
+            categorizer = repo::categorizeExtension
+        )
+        assertNotNull(fileItem)
+        assertFalse(fileItem!!.isDirectory)
+        assertEquals(2048L, fileItem.sizeBytes)
+        assertEquals(com.example.core.storage.FileCategory.APK_BUNDLE, fileItem.category)
+
+        val symlinkItem = com.example.core.storage.RootFileBridge.parseLsLine(
+            parentPath = "/",
+            rawLine = "lrwxrwxrwx 1 root root 11 Mar 12 09:00 bin -> /system/bin",
+            categorizer = repo::categorizeExtension
+        )
+        assertNotNull(symlinkItem)
+        assertTrue(symlinkItem!!.isDirectory)
+        assertEquals("/system/bin", symlinkItem.symlinkTarget)
+
+        val ignoredDot = com.example.core.storage.RootFileBridge.parseLsLine(
+            parentPath = "/",
+            rawLine = "drwxr-xr-x 2 root root 4096 2025-01-12 08:30 ..",
+            categorizer = repo::categorizeExtension
+        )
+        assertEquals(null, ignoredDot)
+    }
 }

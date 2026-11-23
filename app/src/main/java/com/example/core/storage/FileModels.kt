@@ -43,10 +43,14 @@ data class FileItem(
     val childCount: Int = 0,
     val extension: String = "",
     val category: FileCategory = FileCategory.TEXT,
-    val safUriString: String? = null
+    val safUriString: String? = null,
+    val rawPermissions: String? = null,
+    val isRootItem: Boolean = false,
+    val symlinkTarget: String? = null
 ) {
     val permissionsString: String
         get() {
+            if (!rawPermissions.isNullOrBlank()) return rawPermissions
             val d = if (isDirectory) "d" else "-"
             val r = if (canRead) "r" else "-"
             val w = if (canWrite) "w" else "-"
