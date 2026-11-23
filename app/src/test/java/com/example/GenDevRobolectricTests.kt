@@ -227,5 +227,36 @@ class GenDevRobolectricTests {
             categorizer = repo::categorizeExtension
         )
         assertEquals(null, ignoredDot)
+
+        val maskedDir = com.example.core.storage.RootFileBridge.parseLsLine(
+            parentPath = "/",
+            rawLine = "d????????? ? ? ? ? ? apex",
+            categorizer = repo::categorizeExtension
+        )
+        assertNotNull(maskedDir)
+        assertTrue(maskedDir!!.isDirectory)
+        assertEquals("/apex", maskedDir.path)
+
+        val slashSymlink = com.example.core.storage.RootFileBridge.parseLsLine(
+            parentPath = "/",
+            rawLine = "lrwxrwxrwx 1 root root 16 2024-01-01 07:00 bugreports -> /data/user_de/",
+            categorizer = repo::categorizeExtension
+        )
+        assertNotNull(slashSymlink)
+        assertTrue(slashSymlink!!.isDirectory)
+        assertEquals("/data/user_de/", slashSymlink.symlinkTarget)
+    }
+
+    @Test
+    fun `root shell manager never fabricates uid=0 on non root`() = runTest {
+        val shell = com.example.core.root.RootShellManager()
+        val missingRes = shell.execute(command = "id", useRoot = true, suBinary = null)
+        assertEquals(126, missingRes.exitCode)
+        assertFalse(missingRes.asRoot)
+        assertFalse(missingRes.stdout.contains("uid=0"))
+
+        val fakeSuRes = shell.verifyRootAccess("/nonexistent/su/binary")
+        assertTrue(fakeSuRes.exitCode != 0)
+        assertFalse(fakeSuRes.stdout.contains("uid=0"))
     }
 }

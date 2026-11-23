@@ -150,6 +150,20 @@ df -h /data
         "/sdcard" to File("/sdcard")
     )
 
+    private fun isAppOrNormalMediaDir(dir: File): Boolean {
+        val abs = dir.absolutePath
+        if (abs.startsWith(context.filesDir.absolutePath) || abs.startsWith(context.cacheDir.absolutePath)) {
+            return true
+        }
+        val extApp = context.getExternalFilesDir(null)?.absolutePath
+        if (extApp != null && abs.startsWith(extApp)) return true
+        val phone = getPhoneStorageDirectory()?.absolutePath
+        if (phone != null && abs.startsWith(phone) && !abs.contains("/Android/data") && !abs.contains("/Android/obb")) {
+            return true
+        }
+        return false
+    }
+
     suspend fun listDirectory(
         dir: File,
         showHidden: Boolean = false,
@@ -160,20 +174,33 @@ df -h /data
         useRoot: Boolean = false,
         suBinary: String? = null
     ): List<FileItem> = withContext(Dispatchers.IO) {
-        val rawItems: List<FileItem> = if (dir.exists() && dir.isDirectory && dir.canRead()) {
+        val shouldUseRoot = useRoot && !suBinary.isNullOrBlank() &&
+            (!isAppOrNormalMediaDir(dir) || !dir.canRead())
+
+        val rawItems: List<FileItem> = if (shouldUseRoot) {
+            RootFileBridge.listDirectoryRoot(
+                shell = rootShellManager,
+                suBinary = suBinary!!,
+                dirPath = dir.absolutePath,
+                showHidden = showHidden,
+                categorizer = ::categorizeExtension
+            ).getOrElse {
+                if (dir.exists() && dir.isDirectory && dir.canRead()) {
+                    dir.listFiles()?.toList().orEmpty()
+                        .asSequence()
+                        .filter { showHidden || !it.name.startsWith(".") }
+                        .map { file -> toFileItem(file) }
+                        .toList()
+                } else {
+                    emptyList()
+                }
+            }
+        } else if (dir.exists() && dir.isDirectory && dir.canRead()) {
             dir.listFiles()?.toList().orEmpty()
                 .asSequence()
                 .filter { showHidden || !it.name.startsWith(".") }
                 .map { file -> toFileItem(file) }
                 .toList()
-        } else if (useRoot && suBinary != null) {
-            RootFileBridge.listDirectoryRoot(
-                shell = rootShellManager,
-                suBinary = suBinary,
-                dirPath = dir.absolutePath,
-                showHidden = showHidden,
-                categorizer = ::categorizeExtension
-            ).getOrDefault(emptyList())
         } else {
             emptyList()
         }

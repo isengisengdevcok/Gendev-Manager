@@ -15,7 +15,7 @@ object RootFileBridge {
     }
 
     private val lsLineRegex = Regex(
-        """^([\-dlcbps][rwxstST\-]{9}[+@.]?)\s+\d+\s+\S+\s+\S+\s+(?:(\d+),\s*\d+|(\d+))\s+(\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}|[A-Za-z]{3}\s+\d{1,2}\s+(?:\d{2}:\d{2}|\d{4}))\s+(.+)$"""
+        """^([\-dlcbps][rwxstST\-?]{9}[+@.]?)\s+(?:\d+|\?)\s+\S+\s+\S+\s+(?:(\d+),\s*\d+|(\d+)|\?)\s+(\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}\??|[A-Za-z]{3}\s+\d{1,2}\s+(?:\d{2}:\d{2}|\d{4})|\?)\s+(.+)$"""
     )
 
     fun parseLsLine(
@@ -29,7 +29,7 @@ object RootFileBridge {
 
         val perms = match.groupValues[1]
         val sizeStr = match.groupValues[3].ifBlank { "0" }
-        val dateStr = match.groupValues[4]
+        val dateStr = match.groupValues[4].trimEnd('?')
         val rawNamePart = match.groupValues[5]
 
         val isSymlink = perms.startsWith('l')
@@ -49,7 +49,7 @@ object RootFileBridge {
         val cleanParent = if (parentPath == "/") "" else parentPath.trimEnd('/')
         val fullPath = "$cleanParent/$name"
         val isDir = perms.startsWith('d') ||
-            (isSymlink && symlinkTarget != null && !symlinkTarget.substringAfterLast('/').contains('.'))
+            (isSymlink && symlinkTarget != null && (!symlinkTarget.substringAfterLast('/').contains('.') || symlinkTarget.endsWith("/")))
         val ext = if (isDir) "" else name.substringAfterLast('.', "").lowercase(Locale.US)
         val cat = if (isDir) FileCategory.DIRECTORY else categorizer(ext)
         val sizeBytes = sizeStr.toLongOrNull() ?: 0L

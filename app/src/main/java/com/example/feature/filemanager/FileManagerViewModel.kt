@@ -35,8 +35,16 @@ data class PaneTabState(
     val recursiveSearch: Boolean = false,
     val sortBy: SortBy = SortBy.NAME,
     val ascending: Boolean = true,
-    val filterCategory: FilterCategory = FilterCategory.ALL
-)
+    val filterCategory: FilterCategory = FilterCategory.ALL,
+    val backStack: List<String> = emptyList(),
+    val forwardStack: List<String> = emptyList(),
+    val storageSummary: String = ""
+) {
+    val canGoBack: Boolean get() = backStack.isNotEmpty()
+    val canGoForward: Boolean get() = forwardStack.isNotEmpty()
+    val folderCount: Int get() = items.count { it.isDirectory }
+    val fileCount: Int get() = items.count { !it.isDirectory }
+}
 
 data class PaneState(
     val paneIndex: Int,
@@ -64,6 +72,7 @@ data class FileManagerUiState(
     val suBinaryPath: String? = null,
     val rootImplLabel: String = "Non-Root",
     val rootExplorerEnabled: Boolean = false,
+    val rootVerifiedUid0: Boolean = false,
     val hasAllFilesAccess: Boolean = false,
     val statusMessage: String? = null,
     val propertiesModal: FilePropertiesModalData? = null,
@@ -81,10 +90,11 @@ class FileManagerViewModel(private val container: AppContainer) : ViewModel() {
     private val repo = container.storageRepository
     private val archiveEngine = container.archiveEngine
     private val envManager = container.deviceEnvironmentManager
+    private val rootShellManager = container.rootShellManager
 
     private val initialWorkspace = repo.workspaceDir.absolutePath
     private val initialSamples = File(repo.workspaceDir, "Samples").apply { mkdirs() }.absolutePath
-    private val initialPhoneDir = repo.getPhoneStorageDirectory()?.takeIf { it.exists() && it.canRead() }
+    private val initialPhoneDir = repo.getPhoneStorageDirectory()?.takeIf { it.exists() }
 
     private val _uiState = MutableStateFlow(
         FileManagerUiState(
@@ -103,8 +113,8 @@ class FileManagerViewModel(private val container: AppContainer) : ViewModel() {
                 tabs = listOf(
                     PaneTabState(
                         id = "r1",
-                        title = if (initialPhoneDir != null) "Workspace" else "Samples",
-                        currentPath = if (initialPhoneDir != null) initialWorkspace else initialSamples
+                        title = "/",
+                        currentPath = "/"
                     )
                 )
             )
@@ -131,12 +141,14 @@ class FileManagerViewModel(private val container: AppContainer) : ViewModel() {
         viewModelScope.launch {
             val env = withContext(Dispatchers.IO) { envManager.inspectEnvironment() }
             _uiState.update { state ->
+                val effectiveRootAvailable = env.rootAvailable || state.rootVerifiedUid0
                 state.copy(
-                    rootAvailable = env.rootAvailable,
-                    suBinaryPath = env.suBinaryPath,
-                    rootImplLabel = env.rootImplementation.displayName,
+                    rootAvailable = effectiveRootAvailable,
+                    suBinaryPath = env.suBinaryPath ?: state.suBinaryPath,
+                    rootImplLabel = if (env.rootAvailable) env.rootImplementation.displayName else state.rootImplLabel,
                     hasAllFilesAccess = env.allFilesAccessGranted,
-                    rootExplorerEnabled = if (env.rootAvailable) state.rootExplorerEnabled else false
+                    rootExplorerEnabled = if (effectiveRootAvailable) state.rootExplorerEnabled else false,
+                    rootVerifiedUid0 = if (effectiveRootAvailable) state.rootVerifiedUid0 else false
                 )
             }
             refreshPane(0)
@@ -144,18 +156,63 @@ class FileManagerViewModel(private val container: AppContainer) : ViewModel() {
         }
     }
 
-    fun setRootExplorerEnabled(enabled: Boolean) {
+    fun authorizeAndEnableRoot(pointRightPaneToSlash: Boolean = true) {
         val state = _uiState.value
-        if (enabled && (!state.rootAvailable || state.suBinaryPath == null)) {
-            setStatus("Root (su) binary not detected. Non-Root / SAF mode remains active.")
+        viewModelScope.launch {
+            _uiState.update { it.copy(isBusy = true) }
+            val suCmd = state.suBinaryPath ?: "su"
+            val result = rootShellManager.verifyRootAccess(suCmd)
+            val isUid0 = result.exitCode == 0 && result.stdout.contains("uid=0")
+            if (isUid0) {
+                val resolvedLabel = if (state.rootImplLabel == "Non-Root (Standard User)" || state.rootImplLabel == "Non-Root") {
+                    "Root (su • uid=0)"
+                } else {
+                    state.rootImplLabel
+                }
+                _uiState.update {
+                    it.copy(
+                        isBusy = false,
+                        rootAvailable = true,
+                        suBinaryPath = suCmd,
+                        rootImplLabel = resolvedLabel,
+                        rootVerifiedUid0 = true,
+                        rootExplorerEnabled = true,
+                        statusMessage = "Root aktif ($resolvedLabel • uid=0). Panel Kanan siap untuk direktori /."
+                    )
+                }
+                if (pointRightPaneToSlash) {
+                    val rightPath = _uiState.value.rightPane.activeTab.currentPath
+                    if (rightPath == initialWorkspace || rightPath == initialSamples) {
+                        navigateTo(1, "/")
+                    } else {
+                        refreshPane(1)
+                    }
+                    refreshPane(0)
+                } else {
+                    refreshPane(0)
+                    refreshPane(1)
+                }
+            } else {
+                val err = result.stderr.ifBlank { result.stdout }.ifBlank { "Exit code ${result.exitCode}" }
+                _uiState.update {
+                    it.copy(
+                        isBusy = false,
+                        rootVerifiedUid0 = false,
+                        rootExplorerEnabled = false,
+                        statusMessage = "Izin Root (su) ditolak atau tidak tersedia: $err"
+                    )
+                }
+            }
+        }
+    }
+
+    fun setRootExplorerEnabled(enabled: Boolean) {
+        if (enabled) {
+            authorizeAndEnableRoot(pointRightPaneToSlash = false)
             return
         }
-        _uiState.update { it.copy(rootExplorerEnabled = enabled) }
-        if (enabled) {
-            setStatus("Root Explorer enabled (${state.rootImplLabel}). Browse / , /data , /system with care.")
-        } else {
-            setStatus("Switched to standard Non-Root File Manager.")
-        }
+        _uiState.update { it.copy(rootExplorerEnabled = false) }
+        setStatus("Root Explorer dimatikan. Mode Non-Root / SAF aktif.")
         refreshPane(0)
         refreshPane(1)
     }
@@ -218,11 +275,46 @@ class FileManagerViewModel(private val container: AppContainer) : ViewModel() {
         val clean = if (path == "/") "/" else path.trimEnd('/')
         updateActiveTab(paneIndex) { tab ->
             val f = File(clean)
+            val nextBack = if (tab.currentPath != clean) (tab.backStack + tab.currentPath).takeLast(30) else tab.backStack
             tab.copy(
                 currentPath = clean,
                 title = if (clean == "/") "/" else f.name.ifEmpty { "/" },
                 selectedPaths = emptySet(),
-                recursiveSearch = false
+                recursiveSearch = false,
+                backStack = nextBack,
+                forwardStack = if (tab.currentPath != clean) emptyList() else tab.forwardStack
+            )
+        }
+        refreshPane(paneIndex)
+    }
+
+    fun goBack(paneIndex: Int) {
+        val tab = getPane(paneIndex).activeTab
+        val prev = tab.backStack.lastOrNull() ?: return
+        updateActiveTab(paneIndex) { t ->
+            val f = File(prev)
+            t.copy(
+                currentPath = prev,
+                title = if (prev == "/") "/" else f.name.ifEmpty { "/" },
+                selectedPaths = emptySet(),
+                backStack = t.backStack.dropLast(1),
+                forwardStack = (t.forwardStack + t.currentPath).takeLast(30)
+            )
+        }
+        refreshPane(paneIndex)
+    }
+
+    fun goForward(paneIndex: Int) {
+        val tab = getPane(paneIndex).activeTab
+        val next = tab.forwardStack.lastOrNull() ?: return
+        updateActiveTab(paneIndex) { t ->
+            val f = File(next)
+            t.copy(
+                currentPath = next,
+                title = if (next == "/") "/" else f.name.ifEmpty { "/" },
+                selectedPaths = emptySet(),
+                backStack = (t.backStack + t.currentPath).takeLast(30),
+                forwardStack = t.forwardStack.dropLast(1)
             )
         }
         refreshPane(paneIndex)
@@ -231,7 +323,7 @@ class FileManagerViewModel(private val container: AppContainer) : ViewModel() {
     fun navigateToPath(paneIndex: Int, rawPath: String) {
         val cleaned = rawPath.trim()
         if (cleaned.isEmpty()) {
-            setStatus("Enter a valid directory path.")
+            setStatus("Masukkan path direktori yang valid.")
             return
         }
         val normalized = if (cleaned == "/") "/" else cleaned.trimEnd('/')
@@ -240,16 +332,16 @@ class FileManagerViewModel(private val container: AppContainer) : ViewModel() {
         if ((dir.exists() && dir.isDirectory && dir.canRead()) || (state.rootExplorerEnabled && state.suBinaryPath != null)) {
             navigateTo(paneIndex, normalized)
         } else if (state.rootAvailable) {
-            setStatus("Path requires Root Explorer (su). Enable Root toggle at the top first.")
+            setStatus("Path ini membutuhkan Root (su). Aktifkan Root Explorer terlebih dahulu.")
         } else {
-            setStatus("Path is not readable without Root or All Files Access.")
+            setStatus("Path tidak dapat dibaca tanpa Root atau izin All Files Access.")
         }
     }
 
     fun navigateUp(paneIndex: Int) {
         val cur = getPane(paneIndex).activeTab.currentPath
         if (cur == "/") {
-            setStatus("Already at root (/)")
+            setStatus("Sudah berada di root (/)")
             return
         }
         val parent = File(cur).parentFile
@@ -257,9 +349,9 @@ class FileManagerViewModel(private val container: AppContainer) : ViewModel() {
         if (parent != null && (parent.canRead() || (state.rootExplorerEnabled && state.suBinaryPath != null))) {
             navigateTo(paneIndex, parent.absolutePath)
         } else if (state.rootAvailable) {
-            setStatus("Parent directory requires Root Explorer (su). Enable Root toggle above.")
+            setStatus("Direktori induk membutuhkan Root (su). Ketuk 'Aktifkan Root (su)'.")
         } else {
-            setStatus("Parent directory is restricted in Non-Root mode (use Quick Roots above).")
+            setStatus("Direktori induk dibatasi pada perangkat Non-Root.")
         }
     }
 
@@ -317,7 +409,11 @@ class FileManagerViewModel(private val container: AppContainer) : ViewModel() {
                     suBinary = state.suBinaryPath
                 )
             }
-            updateActiveTab(paneIndex) { it.copy(items = items) }
+            val stats = withContext(Dispatchers.IO) { envManager.readStorageStats(dir) }
+            val summary = if (stats.totalBytes > 0L) {
+                "${HashUtils.formatBytes(stats.freeBytes)} bebas / ${HashUtils.formatBytes(stats.totalBytes)}"
+            } else ""
+            updateActiveTab(paneIndex) { it.copy(items = items, storageSummary = summary) }
         }
     }
 
@@ -325,7 +421,7 @@ class FileManagerViewModel(private val container: AppContainer) : ViewModel() {
         val targetPaneIndex = if (sourcePaneIndex == 0) 1 else 0
         val selected = getPane(sourcePaneIndex).activeTab.selectedPaths.map { File(it) }
         if (selected.isEmpty()) {
-            setStatus("Select one or more items first.")
+            setStatus("Pilih minimal 1 file/folder terlebih dahulu (tekan lama baris item).")
             return
         }
         val destDir = File(getPane(targetPaneIndex).activeTab.currentPath)
@@ -335,10 +431,10 @@ class FileManagerViewModel(private val container: AppContainer) : ViewModel() {
             val res = repo.copyFiles(selected, destDir, state.rootExplorerEnabled, state.suBinaryPath)
             _uiState.update { it.copy(isBusy = false) }
             res.onSuccess { count ->
-                setStatus("Copied $count item(s) to ${destDir.name.ifEmpty { "/" }}")
+                setStatus("Disalin $count item ke ${destDir.name.ifEmpty { "/" }}")
                 clearSelection(sourcePaneIndex)
                 refreshPane(targetPaneIndex)
-            }.onFailure { setStatus("Copy failed: ${it.localizedMessage}") }
+            }.onFailure { setStatus("Gagal menyalin: ${it.localizedMessage}") }
         }
     }
 
@@ -351,9 +447,9 @@ class FileManagerViewModel(private val container: AppContainer) : ViewModel() {
             val res = repo.copyFiles(listOf(File(item.path)), destDir, state.rootExplorerEnabled, state.suBinaryPath)
             _uiState.update { it.copy(isBusy = false) }
             res.onSuccess {
-                setStatus("Copied ${item.name} -> ${destDir.name.ifEmpty { "/" }}")
+                setStatus("Disalin ${item.name} -> ${destDir.name.ifEmpty { "/" }}")
                 refreshPane(targetPaneIndex)
-            }.onFailure { setStatus("Copy failed: ${it.localizedMessage}") }
+            }.onFailure { setStatus("Gagal menyalin: ${it.localizedMessage}") }
         }
     }
 
@@ -361,7 +457,7 @@ class FileManagerViewModel(private val container: AppContainer) : ViewModel() {
         val targetPaneIndex = if (sourcePaneIndex == 0) 1 else 0
         val selected = getPane(sourcePaneIndex).activeTab.selectedPaths.map { File(it) }
         if (selected.isEmpty()) {
-            setStatus("Select one or more items first.")
+            setStatus("Pilih minimal 1 file/folder terlebih dahulu.")
             return
         }
         val destDir = File(getPane(targetPaneIndex).activeTab.currentPath)
@@ -371,11 +467,11 @@ class FileManagerViewModel(private val container: AppContainer) : ViewModel() {
             val res = repo.moveFiles(selected, destDir, state.rootExplorerEnabled, state.suBinaryPath)
             _uiState.update { it.copy(isBusy = false) }
             res.onSuccess { count ->
-                setStatus("Moved $count item(s) to ${destDir.name.ifEmpty { "/" }}")
+                setStatus("Dipindah $count item ke ${destDir.name.ifEmpty { "/" }}")
                 clearSelection(sourcePaneIndex)
                 refreshPane(0)
                 refreshPane(1)
-            }.onFailure { setStatus("Move failed: ${it.localizedMessage}") }
+            }.onFailure { setStatus("Gagal memindah: ${it.localizedMessage}") }
         }
     }
 
@@ -388,10 +484,10 @@ class FileManagerViewModel(private val container: AppContainer) : ViewModel() {
             val res = repo.moveFiles(listOf(File(item.path)), destDir, state.rootExplorerEnabled, state.suBinaryPath)
             _uiState.update { it.copy(isBusy = false) }
             res.onSuccess {
-                setStatus("Moved ${item.name} -> ${destDir.name.ifEmpty { "/" }}")
+                setStatus("Dipindah ${item.name} -> ${destDir.name.ifEmpty { "/" }}")
                 refreshPane(0)
                 refreshPane(1)
-            }.onFailure { setStatus("Move failed: ${it.localizedMessage}") }
+            }.onFailure { setStatus("Gagal memindah: ${it.localizedMessage}") }
         }
     }
 
@@ -407,11 +503,11 @@ class FileManagerViewModel(private val container: AppContainer) : ViewModel() {
                 suBinary = state.suBinaryPath
             )
             res.onSuccess { count ->
-                setStatus("Deleted $count item(s)")
+                setStatus("Dihapus $count item")
                 clearSelection(paneIndex)
                 refreshPane(0)
                 refreshPane(1)
-            }.onFailure { setStatus("Delete failed: ${it.localizedMessage}") }
+            }.onFailure { setStatus("Gagal menghapus: ${it.localizedMessage}") }
         }
     }
 
@@ -425,10 +521,10 @@ class FileManagerViewModel(private val container: AppContainer) : ViewModel() {
                 suBinary = state.suBinaryPath
             )
             res.onSuccess {
-                setStatus("Deleted ${item.name}")
+                setStatus("Dihapus ${item.name}")
                 refreshPane(0)
                 refreshPane(1)
-            }.onFailure { setStatus("Delete failed: ${it.localizedMessage}") }
+            }.onFailure { setStatus("Gagal menghapus: ${it.localizedMessage}") }
         }
     }
 
@@ -438,10 +534,10 @@ class FileManagerViewModel(private val container: AppContainer) : ViewModel() {
         viewModelScope.launch {
             repo.createFolder(parent, name, state.rootExplorerEnabled, state.suBinaryPath)
                 .onSuccess {
-                    setStatus("Created folder ${it.name}")
+                    setStatus("Folder dibuat: ${it.name}")
                     refreshPane(paneIndex)
                 }
-                .onFailure { setStatus("Create folder error: ${it.localizedMessage}") }
+                .onFailure { setStatus("Gagal membuat folder: ${it.localizedMessage}") }
         }
     }
 
@@ -451,10 +547,10 @@ class FileManagerViewModel(private val container: AppContainer) : ViewModel() {
         viewModelScope.launch {
             repo.createFile(parent, name, useRoot = state.rootExplorerEnabled, suBinary = state.suBinaryPath)
                 .onSuccess {
-                    setStatus("Created file ${it.name}")
+                    setStatus("File dibuat: ${it.name}")
                     refreshPane(paneIndex)
                 }
-                .onFailure { setStatus("Create file error: ${it.localizedMessage}") }
+                .onFailure { setStatus("Gagal membuat file: ${it.localizedMessage}") }
         }
     }
 
@@ -463,27 +559,27 @@ class FileManagerViewModel(private val container: AppContainer) : ViewModel() {
         viewModelScope.launch {
             repo.renameFile(File(item.path), newName, state.rootExplorerEnabled, state.suBinaryPath)
                 .onSuccess {
-                    setStatus("Renamed to ${it.name}")
+                    setStatus("Diubah nama menjadi ${it.name}")
                     refreshPane(0)
                     refreshPane(1)
                 }
-                .onFailure { setStatus("Rename failed: ${it.localizedMessage}") }
+                .onFailure { setStatus("Gagal ubah nama: ${it.localizedMessage}") }
         }
     }
 
     fun chmodItem(paneIndex: Int, item: FileItem, octalMode: String) {
         val su = _uiState.value.suBinaryPath
         if (!_uiState.value.rootExplorerEnabled || su == null) {
-            setStatus("chmod requires Root Explorer (su) to be active.")
+            setStatus("chmod membutuhkan Root Explorer (su) aktif.")
             return
         }
         viewModelScope.launch {
             repo.chmodRoot(File(item.path), octalMode, su)
                 .onSuccess {
-                    setStatus("Updated permissions of ${item.name} to $octalMode")
+                    setStatus("Permission ${item.name} -> $octalMode")
                     refreshPane(paneIndex)
                 }
-                .onFailure { setStatus("chmod failed: ${it.localizedMessage}") }
+                .onFailure { setStatus("chmod gagal: ${it.localizedMessage}") }
         }
     }
 
@@ -494,14 +590,14 @@ class FileManagerViewModel(private val container: AppContainer) : ViewModel() {
             val res = repo.stageReadableCopyIfNeeded(file, state.rootExplorerEnabled, state.suBinaryPath)
             _uiState.update { it.copy(isBusy = false) }
             res.onSuccess(onReady)
-                .onFailure { setStatus(it.localizedMessage ?: "Cannot open protected file") }
+                .onFailure { setStatus(it.localizedMessage ?: "Tidak bisa membuka file terproteksi") }
         }
     }
 
     fun compressSelected(paneIndex: Int, zipName: String) {
         val selected = getPane(paneIndex).activeTab.selectedPaths.map { File(it) }
         if (selected.isEmpty()) {
-            setStatus("Select files to compress.")
+            setStatus("Pilih file untuk dikompres.")
             return
         }
         val cleanName = if (zipName.endsWith(".zip", ignoreCase = true)) zipName else "$zipName.zip"
@@ -510,11 +606,11 @@ class FileManagerViewModel(private val container: AppContainer) : ViewModel() {
             _uiState.update { it.copy(isBusy = true) }
             archiveEngine.compressFiles(selected, outZip)
                 .onSuccess {
-                    setStatus("Compressed ${selected.size} item(s) -> ${it.name}")
+                    setStatus("Dikompres ${selected.size} item -> ${it.name}")
                     clearSelection(paneIndex)
                     refreshPane(paneIndex)
                 }
-                .onFailure { setStatus("Compression failed: ${it.localizedMessage}") }
+                .onFailure { setStatus("Kompresi gagal: ${it.localizedMessage}") }
             _uiState.update { it.copy(isBusy = false) }
         }
     }
@@ -530,7 +626,7 @@ class FileManagerViewModel(private val container: AppContainer) : ViewModel() {
                 }
                 .onFailure {
                     _uiState.update { state -> state.copy(isBusy = false) }
-                    setStatus("Archive error: ${it.localizedMessage}")
+                    setStatus("Error arsip: ${it.localizedMessage}")
                 }
         }
     }
@@ -547,13 +643,13 @@ class FileManagerViewModel(private val container: AppContainer) : ViewModel() {
             archiveEngine.extractAll(archive, destDir)
                 .onSuccess { count ->
                     closeArchiveInspector()
-                    setStatus("Extracted $count entries to ${destDir.name}/")
+                    setStatus("Diekstrak $count entri ke ${destDir.name}/")
                     refreshPane(0)
                     refreshPane(1)
                 }
                 .onFailure {
                     _uiState.update { s -> s.copy(isBusy = false) }
-                    setStatus("Extraction failed: ${it.localizedMessage}")
+                    setStatus("Ekstraksi gagal: ${it.localizedMessage}")
                 }
         }
     }
@@ -594,7 +690,7 @@ class FileManagerViewModel(private val container: AppContainer) : ViewModel() {
             container.database.bookmarkDao().insert(
                 BookmarkEntity(path = tab.currentPath, label = tab.title)
             )
-            setStatus("Bookmarked ${tab.title}")
+            setStatus("Bookmark disimpan: ${tab.title}")
         }
     }
 
@@ -646,7 +742,7 @@ class FileManagerViewModel(private val container: AppContainer) : ViewModel() {
         val leftSel = _uiState.value.leftPane.activeTab.selectedPaths.firstOrNull()?.let { File(it) }
         val rightSel = _uiState.value.rightPane.activeTab.selectedPaths.firstOrNull()?.let { File(it) }
         if (leftSel == null || rightSel == null || !leftSel.isFile || !rightSel.isFile) {
-            setStatus("Select 1 file in Left Pane and 1 file in Right Pane to compare.")
+            setStatus("Pilih 1 file di Panel Kiri dan 1 file di Panel Kanan untuk membandingkan.")
             return
         }
         viewModelScope.launch {
@@ -670,10 +766,10 @@ class FileManagerViewModel(private val container: AppContainer) : ViewModel() {
             _uiState.update { it.copy(isBusy = true) }
             repo.importUriToDir(uri, destDir, displayName)
                 .onSuccess {
-                    setStatus("Imported ${it.name} into ${destDir.name}")
+                    setStatus("Diimpor ${it.name} ke ${destDir.name}")
                     refreshPane(targetPaneIndex)
                 }
-                .onFailure { setStatus("Import error: ${it.localizedMessage}") }
+                .onFailure { setStatus("Gagal impor: ${it.localizedMessage}") }
             _uiState.update { it.copy(isBusy = false) }
         }
     }

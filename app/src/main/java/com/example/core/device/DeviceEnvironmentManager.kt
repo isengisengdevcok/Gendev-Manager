@@ -62,9 +62,10 @@ data class DeviceEnvironmentInfo(
 class DeviceEnvironmentManager(private val context: Context) {
 
     fun inspectEnvironment(): DeviceEnvironmentInfo {
-        val suPath = findSuBinary()
-        val rootImpl = detectRootImplementation(suPath)
-        val rootAvailable = suPath != null || rootImpl != RootImplementation.NONE
+        val discoveredSu = findSuBinary()
+        val rootImpl = detectRootImplementation(discoveredSu)
+        val effectiveSu = discoveredSu ?: if (rootImpl != RootImplementation.NONE) "su" else null
+        val rootAvailable = effectiveSu != null
         val shizukuInstalled = isPackageInstalled("moe.shizuku.privileged.api")
         val allFilesGranted = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
             runCatching { Environment.isExternalStorageManager() }.getOrDefault(false)
@@ -104,7 +105,7 @@ class DeviceEnvironmentManager(private val context: Context) {
             totalRamBytes = totalRam,
             availableRamBytes = availRam,
             rootAvailable = rootAvailable,
-            suBinaryPath = suPath,
+            suBinaryPath = effectiveSu,
             rootImplementation = rootImpl,
             shizukuInstalled = shizukuInstalled,
             allFilesAccessGranted = allFilesGranted,
@@ -115,7 +116,8 @@ class DeviceEnvironmentManager(private val context: Context) {
 
     fun readStorageStats(targetDir: File): StorageStats {
         return try {
-            val stat = StatFs(targetDir.absolutePath)
+            val probe = if (targetDir.exists()) targetDir else Environment.getDataDirectory()
+            val stat = StatFs(probe.absolutePath)
             val total = stat.blockSizeLong * stat.blockCountLong
             val free = stat.blockSizeLong * stat.availableBlocksLong
             StorageStats(
@@ -160,7 +162,21 @@ class DeviceEnvironmentManager(private val context: Context) {
     }
 
     fun findSuBinary(paths: List<String> = DEFAULT_SU_PATHS): String? {
-        return paths.firstOrNull { path ->
+        val isRobolectric = Build.FINGERPRINT.equals("robolectric", ignoreCase = true)
+        val envPathEntries = if (isRobolectric) {
+            emptyList()
+        } else {
+            System.getenv("PATH")
+                ?.split(File.pathSeparatorChar)
+                ?.filter { entry ->
+                    entry.isNotBlank() && ANDROID_BIN_PREFIXES.any { prefix -> entry.startsWith(prefix) }
+                }
+                ?.map { dir -> File(dir, "su").absolutePath }
+                .orEmpty()
+        }
+
+        val candidates = (paths + envPathEntries).distinct()
+        val directHit = candidates.firstOrNull { path ->
             try {
                 val f = File(path)
                 f.exists() && f.canExecute()
@@ -168,6 +184,23 @@ class DeviceEnvironmentManager(private val context: Context) {
                 false
             }
         }
+        if (directHit != null) return directHit
+
+        if (!isRobolectric && File("/system/bin/sh").exists()) {
+            val whichHit = runCatching {
+                val proc = ProcessBuilder("/system/bin/sh", "-c", "command -v su 2>/dev/null || which su 2>/dev/null")
+                    .redirectErrorStream(true)
+                    .start()
+                val out = proc.inputStream.bufferedReader().use { it.readText().trim() }
+                proc.waitFor()
+                out.lineSequence().firstOrNull { line ->
+                    line.startsWith("/") && ANDROID_BIN_PREFIXES.any { prefix -> line.startsWith(prefix) }
+                }
+            }.getOrNull()
+            if (!whichHit.isNullOrBlank()) return whichHit
+        }
+
+        return null
     }
 
     fun detectRootImplementation(suPath: String?): RootImplementation {
@@ -175,12 +208,14 @@ class DeviceEnvironmentManager(private val context: Context) {
             isPackageInstalled("io.github.huskydg.magisk") ||
                 File("/data/adb/kitsune").exists() -> RootImplementation.KITSUNE_MASK
             isPackageInstalled("me.weishu.kernelsu") ||
+                isPackageInstalled("com.rifsxd.ksunext") ||
                 File("/data/adb/ksu").exists() -> RootImplementation.KERNEL_SU
             isPackageInstalled("me.bmax.apatch") ||
                 File("/data/adb/ap").exists() -> RootImplementation.APATCH
             isPackageInstalled("com.topjohnwu.magisk") ||
                 File("/data/adb/magisk").exists() -> RootImplementation.MAGISK
-            suPath != null -> RootImplementation.SUPERSU
+            isPackageInstalled("eu.chainfire.supersu") ||
+                suPath != null -> RootImplementation.SUPERSU
             else -> RootImplementation.NONE
         }
     }
@@ -205,6 +240,19 @@ class DeviceEnvironmentManager(private val context: Context) {
     }
 
     companion object {
+        private val ANDROID_BIN_PREFIXES = listOf(
+            "/system/",
+            "/vendor/",
+            "/apex/",
+            "/data/",
+            "/sbin",
+            "/debug_ramdisk",
+            "/su/",
+            "/product/",
+            "/system_ext/",
+            "/odm/"
+        )
+
         val DEFAULT_SU_PATHS = listOf(
             "/system/bin/su",
             "/system/xbin/su",
@@ -214,7 +262,10 @@ class DeviceEnvironmentManager(private val context: Context) {
             "/data/local/su",
             "/data/local/bin/su",
             "/data/local/xbin/su",
-            "/vendor/bin/su"
+            "/vendor/bin/su",
+            "/data/adb/ksu/bin/su",
+            "/data/adb/ap/bin/su",
+            "/apex/com.android.runtime/bin/su"
         )
     }
 }

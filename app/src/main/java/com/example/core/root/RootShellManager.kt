@@ -8,6 +8,7 @@ import kotlinx.coroutines.withContext
 import java.io.BufferedReader
 import java.io.File
 import java.io.InputStreamReader
+import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicReference
 
 data class ShellCommandResult(
@@ -28,14 +29,20 @@ class RootShellManager {
 
     private val activeProcess = AtomicReference<Process?>(null)
 
+    suspend fun verifyRootAccess(suBinary: String?): ShellCommandResult {
+        val candidate = suBinary?.takeIf { it.isNotBlank() } ?: "su"
+        return execute(command = "id", useRoot = true, suBinary = candidate, timeoutSeconds = 20)
+    }
+
     suspend fun execute(
         command: String,
         workingDir: File? = null,
         useRoot: Boolean = false,
-        suBinary: String? = null
+        suBinary: String? = null,
+        timeoutSeconds: Long = 20
     ): ShellCommandResult = withContext(Dispatchers.IO) {
         val start = System.currentTimeMillis()
-        if (useRoot && suBinary == null) {
+        if (useRoot && suBinary.isNullOrBlank()) {
             return@withContext ShellCommandResult(
                 command = command,
                 exitCode = 126,
@@ -46,7 +53,7 @@ class RootShellManager {
             )
         }
 
-        val shellCmd = if (useRoot && suBinary != null) {
+        val shellCmd = if (useRoot && !suBinary.isNullOrBlank()) {
             listOf(suBinary, "-c", command)
         } else {
             listOf("/system/bin/sh", "-c", command)
@@ -60,16 +67,43 @@ class RootShellManager {
             val process = pb.start()
             activeProcess.set(process)
 
-            val stdout = process.inputStream.bufferedReader().use { it.readText() }
-            val stderr = process.errorStream.bufferedReader().use { it.readText() }
-            val exitCode = process.waitFor()
+            val stderrHolder = AtomicReference("")
+            val stderrThread = Thread {
+                stderrHolder.set(
+                    runCatching { process.errorStream.bufferedReader().use { it.readText() } }
+                        .getOrDefault("")
+                )
+            }.apply {
+                isDaemon = true
+                start()
+            }
+
+            val stdout = runCatching { process.inputStream.bufferedReader().use { it.readText() } }
+                .getOrDefault("")
+
+            val finished = process.waitFor(timeoutSeconds, TimeUnit.SECONDS)
+            if (!finished) {
+                process.destroyForcibly()
+                activeProcess.compareAndSet(process, null)
+                return@withContext ShellCommandResult(
+                    command = command,
+                    exitCode = 124,
+                    stdout = stdout.trimEnd(),
+                    stderr = "Command timed out after ${timeoutSeconds}s (check superuser manager prompt).",
+                    asRoot = useRoot,
+                    durationMs = System.currentTimeMillis() - start
+                )
+            }
+
+            stderrThread.join(1000)
+            val exitCode = process.exitValue()
             activeProcess.compareAndSet(process, null)
 
             ShellCommandResult(
                 command = command,
                 exitCode = exitCode,
                 stdout = stdout.trimEnd(),
-                stderr = stderr.trimEnd(),
+                stderr = stderrHolder.get().trimEnd(),
                 asRoot = useRoot,
                 durationMs = System.currentTimeMillis() - start
             )
@@ -92,7 +126,7 @@ class RootShellManager {
         useRoot: Boolean = false,
         suBinary: String? = null
     ): Flow<ShellStreamLine> = flow {
-        if (useRoot && suBinary == null) {
+        if (useRoot && suBinary.isNullOrBlank()) {
             emit(
                 ShellStreamLine(
                     "ERROR: Root (su) binary not found. Standard non-root shell is active.",
@@ -102,7 +136,7 @@ class RootShellManager {
             return@flow
         }
 
-        val shellCmd = if (useRoot && suBinary != null) {
+        val shellCmd = if (useRoot && !suBinary.isNullOrBlank()) {
             listOf(suBinary, "-c", command)
         } else {
             listOf("/system/bin/sh", "-c", command)

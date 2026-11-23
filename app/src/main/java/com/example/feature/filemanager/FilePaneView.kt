@@ -24,12 +24,14 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.ArrowForward
 import androidx.compose.material.icons.automirrored.filled.DriveFileMove
 import androidx.compose.material.icons.automirrored.filled.InsertDriveFile
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Android
 import androidx.compose.material.icons.filled.Archive
 import androidx.compose.material.icons.filled.ArrowUpward
+import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Code
 import androidx.compose.material.icons.filled.ContentCopy
@@ -45,11 +47,11 @@ import androidx.compose.material.icons.filled.PhoneAndroid
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Security
 import androidx.compose.material3.ButtonDefaults
-import androidx.compose.material3.Checkbox
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.FilledTonalButton
 import androidx.compose.material3.FilterChip
+import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
@@ -82,12 +84,16 @@ import com.example.core.ui.theme.JetBrainsMonoFontFamily
 import com.example.core.ui.theme.StatusDanger
 import com.example.core.ui.theme.StatusWarning
 import com.example.core.ui.theme.VioletPrimary
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
 
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
 fun FilePaneView(
     pane: PaneState,
     isActive: Boolean,
+    isRootSide: Boolean,
     rootExplorerEnabled: Boolean,
     rootAvailable: Boolean,
     hasAllFilesAccess: Boolean,
@@ -119,42 +125,56 @@ fun FilePaneView(
     val tab = pane.activeTab
     var showSearchBar by remember { mutableStateOf(false) }
     var sortMenuExpanded by remember { mutableStateOf(false) }
+    val accent = if (isRootSide && rootExplorerEnabled) StatusWarning else CyanSecondary
     val borderColor = if (isActive) {
-        if (rootExplorerEnabled) StatusWarning.copy(alpha = 0.78f) else CyanSecondary.copy(alpha = 0.7f)
+        accent.copy(alpha = 0.85f)
     } else {
-        MaterialTheme.colorScheme.outline.copy(alpha = 0.35f)
+        MaterialTheme.colorScheme.outline.copy(alpha = 0.25f)
     }
 
     Surface(
         modifier = modifier
-            .clip(RoundedCornerShape(14.dp))
-            .border(BorderStroke(1.5.dp, borderColor), RoundedCornerShape(14.dp))
+            .clip(RoundedCornerShape(10.dp))
+            .border(BorderStroke(if (isActive) 1.5.dp else 0.75.dp, borderColor), RoundedCornerShape(10.dp))
             .clickable(onClick = onActivate),
         color = MaterialTheme.colorScheme.surface,
-        shape = RoundedCornerShape(14.dp)
+        shape = RoundedCornerShape(10.dp)
     ) {
         Column(modifier = Modifier.fillMaxSize()) {
-            // Multi-Tab Strip
+            // Compact Pane Header: Role badge + Multi-Tab Strip
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .background(MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.55f))
+                    .background(
+                        if (isActive) accent.copy(alpha = 0.14f)
+                        else MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.45f)
+                    )
                     .horizontalScroll(rememberScrollState())
                     .padding(horizontal = 6.dp, vertical = 4.dp),
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.spacedBy(4.dp)
             ) {
+                Text(
+                    text = if (isRootSide) "ROOT" else "BIASA",
+                    style = MaterialTheme.typography.labelSmall,
+                    fontWeight = FontWeight.Bold,
+                    color = accent,
+                    modifier = Modifier
+                        .clip(RoundedCornerShape(4.dp))
+                        .background(accent.copy(alpha = 0.16f))
+                        .padding(horizontal = 5.dp, vertical = 2.dp)
+                )
                 pane.tabs.forEachIndexed { idx, t ->
                     val selected = idx == pane.activeTabIndex
                     Row(
                         modifier = Modifier
-                            .clip(RoundedCornerShape(8.dp))
+                            .clip(RoundedCornerShape(6.dp))
                             .background(
-                                if (selected) MaterialTheme.colorScheme.primary.copy(alpha = 0.22f)
+                                if (selected) MaterialTheme.colorScheme.primary.copy(alpha = 0.2f)
                                 else Color.Transparent
                             )
                             .clickable { onActivate(); onSelectTab(idx) }
-                            .padding(horizontal = 8.dp, vertical = 4.dp),
+                            .padding(horizontal = 6.dp, vertical = 3.dp),
                         verticalAlignment = Alignment.CenterVertically
                     ) {
                         Text(
@@ -164,12 +184,12 @@ fun FilePaneView(
                             maxLines = 1
                         )
                         if (pane.tabs.size > 1) {
-                            Spacer(modifier = Modifier.width(4.dp))
+                            Spacer(modifier = Modifier.width(3.dp))
                             Icon(
                                 Icons.Filled.Close,
                                 contentDescription = "Close Tab",
                                 modifier = Modifier
-                                    .size(14.dp)
+                                    .size(12.dp)
                                     .clickable { onCloseTab(idx) }
                             )
                         }
@@ -178,31 +198,23 @@ fun FilePaneView(
                 Icon(
                     Icons.Filled.Add,
                     contentDescription = "New Tab",
-                    tint = CyanSecondary,
+                    tint = accent,
                     modifier = Modifier
-                        .size(24.dp)
-                        .clip(RoundedCornerShape(6.dp))
+                        .size(20.dp)
+                        .clip(RoundedCornerShape(5.dp))
                         .clickable { onActivate(); onAddTab() }
                         .padding(2.dp)
                         .testTag("add_tab_pane_${pane.paneIndex}")
                 )
             }
 
-            // Breadcrumb + Pane Controls
+            // Compact Path + GoToPath + Search + Sort Bar
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .padding(horizontal = 6.dp, vertical = 4.dp),
+                    .padding(horizontal = 4.dp, vertical = 2.dp),
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                IconButton(
-                    onClick = { onActivate(); onNavigateUp() },
-                    modifier = Modifier
-                        .size(36.dp)
-                        .testTag("up_pane_${pane.paneIndex}")
-                ) {
-                    Icon(Icons.Filled.ArrowUpward, contentDescription = "Parent Folder", modifier = Modifier.size(18.dp))
-                }
                 Row(
                     modifier = Modifier
                         .weight(1f)
@@ -213,12 +225,12 @@ fun FilePaneView(
                         Text(
                             text = "/",
                             style = MaterialTheme.typography.labelSmall,
-                            color = if (tab.currentPath == "/") CyanSecondary else MaterialTheme.colorScheme.onSurfaceVariant,
+                            color = if (tab.currentPath == "/") accent else MaterialTheme.colorScheme.onSurfaceVariant,
                             fontFamily = JetBrainsMonoFontFamily,
                             modifier = Modifier
                                 .clip(RoundedCornerShape(4.dp))
                                 .clickable { onActivate(); onNavigateTo("/") }
-                                .padding(horizontal = 4.dp, vertical = 2.dp)
+                                .padding(horizontal = 3.dp, vertical = 2.dp)
                         )
                     }
                     val segments = tab.currentPath.split('/').filter { it.isNotEmpty() }
@@ -227,9 +239,9 @@ fun FilePaneView(
                         acc += "/$seg"
                         val target = acc
                         Text(
-                            text = if (idx == 0) seg else " / $seg",
+                            text = if (idx == 0) seg else "/$seg",
                             style = MaterialTheme.typography.labelSmall,
-                            color = if (idx == segments.lastIndex) CyanSecondary else MaterialTheme.colorScheme.onSurfaceVariant,
+                            color = if (idx == segments.lastIndex) accent else MaterialTheme.colorScheme.onSurfaceVariant,
                             modifier = Modifier
                                 .clip(RoundedCornerShape(4.dp))
                                 .clickable { onActivate(); onNavigateTo(target) }
@@ -240,18 +252,18 @@ fun FilePaneView(
                 IconButton(
                     onClick = { onActivate(); onOpenGoToPath() },
                     modifier = Modifier
-                        .size(34.dp)
+                        .size(28.dp)
                         .testTag("goto_path_pane_${pane.paneIndex}")
                 ) {
-                    Icon(Icons.Filled.EditLocationAlt, contentDescription = "Go to Path", modifier = Modifier.size(18.dp))
+                    Icon(Icons.Filled.EditLocationAlt, contentDescription = "Go to Path", modifier = Modifier.size(15.dp))
                 }
                 IconButton(
-                    onClick = { showSearchBar = !showSearchBar },
+                    onClick = { onActivate(); showSearchBar = !showSearchBar },
                     modifier = Modifier
-                        .size(34.dp)
+                        .size(28.dp)
                         .testTag("search_pane_${pane.paneIndex}")
                 ) {
-                    Icon(Icons.Filled.Search, contentDescription = "Search Pane", modifier = Modifier.size(18.dp))
+                    Icon(Icons.Filled.Search, contentDescription = "Search Pane", modifier = Modifier.size(15.dp))
                 }
                 Box {
                     Text(
@@ -259,9 +271,9 @@ fun FilePaneView(
                         style = MaterialTheme.typography.labelSmall,
                         color = MaterialTheme.colorScheme.primary,
                         modifier = Modifier
-                            .clip(RoundedCornerShape(6.dp))
-                            .clickable { sortMenuExpanded = true }
-                            .padding(horizontal = 6.dp, vertical = 6.dp)
+                            .clip(RoundedCornerShape(4.dp))
+                            .clickable { onActivate(); sortMenuExpanded = true }
+                            .padding(horizontal = 4.dp, vertical = 4.dp)
                             .testTag("sort_pane_${pane.paneIndex}")
                     )
                     DropdownMenu(expanded = sortMenuExpanded, onDismissRequest = { sortMenuExpanded = false }) {
@@ -281,18 +293,29 @@ fun FilePaneView(
                 }
             }
 
+            // Compact Folder / File Counter Line (matches clear density)
+            Text(
+                text = "Folder: ${tab.folderCount}  File: ${tab.fileCount}",
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+                modifier = Modifier.padding(horizontal = 8.dp, vertical = 1.dp)
+            )
+            HorizontalDivider(thickness = 0.5.dp, color = MaterialTheme.colorScheme.outline.copy(alpha = 0.2f))
+
             if (showSearchBar) {
                 Row(
                     modifier = Modifier
                         .fillMaxWidth()
-                        .padding(horizontal = 8.dp, vertical = 2.dp),
+                        .padding(horizontal = 6.dp, vertical = 4.dp),
                     verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(6.dp)
+                    horizontalArrangement = Arrangement.spacedBy(4.dp)
                 ) {
                     OutlinedTextField(
                         value = tab.searchQuery,
                         onValueChange = { onSearchChange(it, tab.recursiveSearch) },
-                        placeholder = { Text("Filter / search...", style = MaterialTheme.typography.bodySmall) },
+                        placeholder = { Text("Cari...", style = MaterialTheme.typography.labelSmall) },
                         singleLine = true,
                         modifier = Modifier.weight(1f)
                     )
@@ -304,69 +327,84 @@ fun FilePaneView(
                 }
             }
 
-            // File List or Actionable Empty State
-            if (tab.items.isEmpty()) {
-                val isRootRestrictedPath = !rootExplorerEnabled && (
-                    tab.currentPath == "/" ||
-                        tab.currentPath.startsWith("/data") ||
-                        tab.currentPath.startsWith("/system") ||
-                        tab.currentPath.startsWith("/vendor")
-                    )
-                val isPhoneStorageBlocked = Build.VERSION.SDK_INT >= Build.VERSION_CODES.R &&
-                    !hasAllFilesAccess &&
-                    tab.currentPath.startsWith("/storage/emulated")
+            val isRootRestrictedPath = !rootExplorerEnabled && (
+                tab.currentPath == "/" ||
+                    tab.currentPath.startsWith("/data") ||
+                    tab.currentPath.startsWith("/system") ||
+                    tab.currentPath.startsWith("/vendor") ||
+                    tab.currentPath.startsWith("/mnt") ||
+                    tab.currentPath.startsWith("/etc") ||
+                    tab.currentPath.startsWith("/acct") ||
+                    tab.currentPath.startsWith("/apex")
+                )
+            val isPhoneStorageBlocked = Build.VERSION.SDK_INT >= Build.VERSION_CODES.R &&
+                !hasAllFilesAccess &&
+                tab.currentPath.startsWith("/storage/emulated")
 
+            // File List or Actionable State
+            if (tab.items.isEmpty() || isRootRestrictedPath) {
                 Column(
                     modifier = Modifier
                         .weight(1f)
-                        .fillMaxWidth(),
+                        .fillMaxWidth()
+                        .padding(8.dp),
                     horizontalAlignment = Alignment.CenterHorizontally,
                     verticalArrangement = Arrangement.Center
                 ) {
                     EmptyStatePanel(
                         icon = if (isRootRestrictedPath) Icons.Filled.Security else Icons.Filled.Folder,
                         title = when {
-                            isPhoneStorageBlocked -> "Phone Storage Locked"
-                            isRootRestrictedPath -> "Root Explorer Required"
-                            else -> "Empty Directory"
+                            isPhoneStorageBlocked -> "Penyimpanan HP Terkunci"
+                            isRootRestrictedPath && rootAvailable -> "Butuh Izin Root (su)"
+                            isRootRestrictedPath -> "Perangkat Non-Root"
+                            else -> "Folder Kosong"
                         },
                         message = when {
-                            isPhoneStorageBlocked -> "Grant All Files Access to browse /storage/emulated/0 directly."
-                            isRootRestrictedPath && rootAvailable -> "Enable Root Explorer (su) in the bar above to browse ${tab.currentPath}."
-                            isRootRestrictedPath -> "This device is Non-Root. System paths require su; use Phone Storage or Workspace."
-                            else -> "No matching files here. Tap + to create or use Quick Roots above."
+                            isPhoneStorageBlocked -> "Izinkan Akses Semua File agar isi /storage/emulated/0 tampil."
+                            isRootRestrictedPath && rootAvailable -> "Ketuk tombol di bawah untuk meminta izin Root (su) asli."
+                            isRootRestrictedPath -> "su tidak terdeteksi. Gunakan Folder Biasa / Workspace / SAF."
+                            else -> "Tidak ada file di sini."
                         }
                     )
                     Spacer(modifier = Modifier.height(6.dp))
-                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        if (isPhoneStorageBlocked) {
-                            FilledTonalButton(
-                                onClick = onRequestPhoneUnlock,
-                                modifier = Modifier.testTag("empty_unlock_phone_btn")
-                            ) {
-                                Icon(Icons.Filled.LockOpen, contentDescription = null, modifier = Modifier.size(16.dp))
-                                Spacer(modifier = Modifier.width(6.dp))
-                                Text("Unlock Phone Storage")
-                            }
-                        } else if (isRootRestrictedPath && rootAvailable) {
-                            FilledTonalButton(
-                                onClick = onRequestRootEnable,
-                                colors = ButtonDefaults.filledTonalButtonColors(
-                                    containerColor = StatusWarning.copy(alpha = 0.2f),
-                                    contentColor = StatusWarning
-                                ),
-                                modifier = Modifier.testTag("empty_enable_root_btn")
-                            ) {
-                                Icon(Icons.Filled.Security, contentDescription = null, modifier = Modifier.size(16.dp))
-                                Spacer(modifier = Modifier.width(6.dp))
-                                Text("Enable Root (su)")
-                            }
-                        } else {
+                    if (isPhoneStorageBlocked) {
+                        FilledTonalButton(
+                            onClick = onRequestPhoneUnlock,
+                            modifier = Modifier.testTag("empty_unlock_phone_btn_${pane.paneIndex}")
+                        ) {
+                            Icon(Icons.Filled.LockOpen, contentDescription = null, modifier = Modifier.size(16.dp))
+                            Spacer(modifier = Modifier.width(6.dp))
+                            Text("Buka Izin File", style = MaterialTheme.typography.labelMedium)
+                        }
+                    } else if (isRootRestrictedPath) {
+                        FilledTonalButton(
+                            onClick = onRequestRootEnable,
+                            colors = ButtonDefaults.filledTonalButtonColors(
+                                containerColor = StatusWarning.copy(alpha = 0.22f),
+                                contentColor = StatusWarning
+                            ),
+                            modifier = Modifier.testTag("empty_enable_root_btn_${pane.paneIndex}")
+                        ) {
+                            Icon(Icons.Filled.Security, contentDescription = null, modifier = Modifier.size(16.dp))
+                            Spacer(modifier = Modifier.width(6.dp))
+                            Text(
+                                text = if (rootAvailable) "Aktifkan Root (su)" else "Coba Izin Root (su)",
+                                style = MaterialTheme.typography.labelMedium
+                            )
+                        }
+                        if (!rootAvailable) {
+                            Spacer(modifier = Modifier.height(6.dp))
                             OutlinedButton(onClick = onOpenPhoneOrWorkspace) {
-                                Icon(Icons.Filled.PhoneAndroid, contentDescription = null, modifier = Modifier.size(16.dp))
-                                Spacer(modifier = Modifier.width(6.dp))
-                                Text("Open Phone / Workspace")
+                                Icon(Icons.Filled.PhoneAndroid, contentDescription = null, modifier = Modifier.size(15.dp))
+                                Spacer(modifier = Modifier.width(4.dp))
+                                Text("Buka Workspace", style = MaterialTheme.typography.labelSmall)
                             }
+                        }
+                    } else {
+                        OutlinedButton(onClick = onOpenPhoneOrWorkspace) {
+                            Icon(Icons.Filled.PhoneAndroid, contentDescription = null, modifier = Modifier.size(15.dp))
+                            Spacer(modifier = Modifier.width(4.dp))
+                            Text("Workspace", style = MaterialTheme.typography.labelSmall)
                         }
                     }
                 }
@@ -376,6 +414,35 @@ fun FilePaneView(
                         .weight(1f)
                         .fillMaxWidth()
                 ) {
+                    if (tab.currentPath != "/") {
+                        item(key = "__parent__") {
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .clickable { onActivate(); onNavigateUp() }
+                                    .padding(horizontal = 8.dp, vertical = 8.dp),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Filled.ArrowUpward,
+                                    contentDescription = "Parent Directory",
+                                    tint = CyanSecondary,
+                                    modifier = Modifier.size(20.dp)
+                                )
+                                Spacer(modifier = Modifier.width(8.dp))
+                                Text(
+                                    text = "..",
+                                    style = MaterialTheme.typography.bodyMedium,
+                                    fontWeight = FontWeight.SemiBold
+                                )
+                            }
+                            HorizontalDivider(
+                                thickness = 0.4.dp,
+                                color = MaterialTheme.colorScheme.outline.copy(alpha = 0.14f)
+                            )
+                        }
+                    }
+
                     items(tab.items, key = { it.path }) { item ->
                         val isSelected = item.path in tab.selectedPaths
                         var rowMenu by remember { mutableStateOf(false) }
@@ -384,92 +451,107 @@ fun FilePaneView(
                             modifier = Modifier
                                 .fillMaxWidth()
                                 .background(
-                                    if (isSelected) MaterialTheme.colorScheme.primary.copy(alpha = 0.16f)
+                                    if (isSelected) MaterialTheme.colorScheme.primary.copy(alpha = 0.18f)
                                     else Color.Transparent
                                 )
                                 .combinedClickable(
                                     onClick = {
                                         onActivate()
-                                        onOpenItem(item)
+                                        if (tab.selectedPaths.isNotEmpty()) {
+                                            onToggleSelect(item.path)
+                                        } else {
+                                            onOpenItem(item)
+                                        }
                                     },
                                     onLongClick = {
                                         onActivate()
                                         onToggleSelect(item.path)
                                     }
                                 )
-                                .padding(horizontal = 8.dp, vertical = 7.dp),
+                                .padding(horizontal = 7.dp, vertical = 6.dp),
                             verticalAlignment = Alignment.CenterVertically
                         ) {
-                            Checkbox(
-                                checked = isSelected,
-                                onCheckedChange = {
-                                    onActivate()
-                                    onToggleSelect(item.path)
-                                },
-                                modifier = Modifier.size(34.dp)
-                            )
-                            Spacer(modifier = Modifier.width(6.dp))
-                            Icon(
-                                imageVector = categoryIcon(item.category),
-                                contentDescription = item.category.name,
-                                tint = categoryColor(item.category),
-                                modifier = Modifier.size(22.dp)
-                            )
-                            Spacer(modifier = Modifier.width(8.dp))
+                            Box(contentAlignment = Alignment.Center) {
+                                Icon(
+                                    imageVector = if (isSelected) Icons.Filled.CheckCircle else categoryIcon(item.category),
+                                    contentDescription = item.category.name,
+                                    tint = if (isSelected) MaterialTheme.colorScheme.primary else categoryColor(item.category),
+                                    modifier = Modifier.size(21.dp)
+                                )
+                            }
+                            Spacer(modifier = Modifier.width(7.dp))
                             Column(modifier = Modifier.weight(1f)) {
                                 Text(
-                                    text = if (item.symlinkTarget != null) "${item.name} -> ${item.symlinkTarget}" else item.name,
-                                    style = MaterialTheme.typography.bodyMedium,
-                                    fontWeight = if (item.isDirectory) FontWeight.SemiBold else FontWeight.Normal,
+                                    text = item.name,
+                                    style = MaterialTheme.typography.bodySmall,
+                                    fontWeight = if (item.isDirectory) FontWeight.Medium else FontWeight.Normal,
                                     maxLines = 1,
                                     overflow = TextOverflow.Ellipsis
                                 )
-                                val detailText = if (item.isDirectory) {
-                                    val countPart = if (item.isRootItem) "Root dir" else "${item.childCount} items"
-                                    "$countPart • ${item.permissionsString}"
+                                val dateText = if (item.lastModified > 0L) {
+                                    formatCompactTimestamp(item.lastModified)
                                 } else {
-                                    val timePart = if (item.lastModified > 0L) {
-                                        HashUtils.formatTimestamp(item.lastModified)
-                                    } else {
-                                        item.permissionsString
-                                    }
-                                    "${HashUtils.formatBytes(item.sizeBytes)} • $timePart"
+                                    item.permissionsString
+                                }
+                                val subText = if (item.isDirectory) {
+                                    if (item.isRootItem) dateText else "$dateText • ${item.childCount} item"
+                                } else {
+                                    "${HashUtils.formatBytes(item.sizeBytes)} • $dateText"
                                 }
                                 Text(
-                                    text = detailText,
+                                    text = subText,
                                     style = MaterialTheme.typography.labelSmall,
                                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                                     maxLines = 1,
                                     overflow = TextOverflow.Ellipsis
                                 )
                             }
+                            if (item.symlinkTarget != null) {
+                                Icon(
+                                    imageVector = Icons.AutoMirrored.Filled.ArrowForward,
+                                    contentDescription = "Symlink -> ${item.symlinkTarget}",
+                                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    modifier = Modifier
+                                        .size(13.dp)
+                                        .padding(end = 2.dp)
+                                )
+                            }
                             Box {
                                 IconButton(
                                     onClick = { onActivate(); rowMenu = true },
                                     modifier = Modifier
-                                        .size(36.dp)
+                                        .size(28.dp)
                                         .testTag("item_menu_${item.name}")
                                 ) {
-                                    Icon(Icons.Filled.MoreVert, contentDescription = "Item Actions", modifier = Modifier.size(18.dp))
+                                    Icon(
+                                        Icons.Filled.MoreVert,
+                                        contentDescription = "Item Actions",
+                                        modifier = Modifier.size(15.dp)
+                                    )
                                 }
                                 DropdownMenu(expanded = rowMenu, onDismissRequest = { rowMenu = false }) {
                                     DropdownMenuItem(
-                                        text = { Text("Copy to Other Pane") },
+                                        text = { Text(if (isSelected) "Batal Pilih" else "Pilih Item") },
+                                        leadingIcon = { Icon(Icons.Filled.CheckCircle, contentDescription = null) },
+                                        onClick = { rowMenu = false; onToggleSelect(item.path) }
+                                    )
+                                    DropdownMenuItem(
+                                        text = { Text("Salin ke Panel Sebelah") },
                                         leadingIcon = { Icon(Icons.Filled.ContentCopy, contentDescription = null) },
                                         onClick = { rowMenu = false; onCopyToOtherPane(item) }
                                     )
                                     DropdownMenuItem(
-                                        text = { Text("Move to Other Pane") },
+                                        text = { Text("Pindah ke Panel Sebelah") },
                                         leadingIcon = { Icon(Icons.AutoMirrored.Filled.DriveFileMove, contentDescription = null) },
                                         onClick = { rowMenu = false; onMoveToOtherPane(item) }
                                     )
                                     DropdownMenuItem(
-                                        text = { Text("Properties & SHA-256") },
+                                        text = { Text("Properti & SHA-256") },
                                         leadingIcon = { Icon(Icons.Filled.Info, contentDescription = null) },
                                         onClick = { rowMenu = false; onProperties(item) }
                                     )
                                     DropdownMenuItem(
-                                        text = { Text("Rename") },
+                                        text = { Text("Ubah Nama") },
                                         leadingIcon = { Icon(Icons.Filled.DriveFileRenameOutline, contentDescription = null) },
                                         onClick = { rowMenu = false; onRename(item) }
                                     )
@@ -482,31 +564,41 @@ fun FilePaneView(
                                     }
                                     if (!item.isDirectory) {
                                         DropdownMenuItem(
-                                            text = { Text("Open in Code/Hex Editor") },
+                                            text = { Text("Buka di Code/Hex Editor") },
                                             leadingIcon = { Icon(Icons.Filled.Code, contentDescription = null) },
                                             onClick = { rowMenu = false; onOpenInEditor(item) }
                                         )
                                     }
                                     if (item.category == FileCategory.APK_BUNDLE || item.category == FileCategory.ARCHIVE) {
                                         DropdownMenuItem(
-                                            text = { Text("Inspect Archive Entries") },
+                                            text = { Text("Isi Arsip / ZIP") },
                                             leadingIcon = { Icon(Icons.Filled.Archive, contentDescription = null) },
                                             onClick = { rowMenu = false; onInspectArchive(item) }
                                         )
                                     }
                                     DropdownMenuItem(
-                                        text = { Text("Delete", color = StatusDanger) },
+                                        text = { Text("Hapus", color = StatusDanger) },
                                         leadingIcon = { Icon(Icons.Filled.Delete, contentDescription = null, tint = StatusDanger) },
                                         onClick = { rowMenu = false; onDelete(item) }
                                     )
                                 }
                             }
                         }
+                        HorizontalDivider(
+                            thickness = 0.4.dp,
+                            color = MaterialTheme.colorScheme.outline.copy(alpha = 0.12f)
+                        )
                     }
                 }
             }
         }
     }
+}
+
+private fun formatCompactTimestamp(epochMs: Long): String {
+    return runCatching {
+        SimpleDateFormat("yy-MM-dd HH:mm", Locale.US).format(Date(epochMs))
+    }.getOrDefault("")
 }
 
 private fun categoryIcon(cat: FileCategory) = when (cat) {

@@ -335,23 +335,26 @@ fun RootModeDialog(
             }
         },
         dismissButton = {
-            TextButton(onClick = onDismiss) { Text("Close") }
-        },
-        confirmButton = {
-            if (rootAvailable) {
-                TextButton(
-                    onClick = onConfirmEnable,
-                    modifier = Modifier.testTag("confirm_enable_root_btn")
-                ) {
-                    Text("Authorize Root", color = StatusWarning)
-                }
-            } else {
+            if (!rootAvailable) {
                 TextButton(onClick = {
                     onDismiss()
                     onOpenPhoneStorageOrUnlock()
                 }) {
-                    Text("Open Phone Storage")
+                    Text("Phone Storage")
                 }
+            } else {
+                TextButton(onClick = onDismiss) { Text("Close") }
+            }
+        },
+        confirmButton = {
+            TextButton(
+                onClick = onConfirmEnable,
+                modifier = Modifier.testTag("confirm_enable_root_btn")
+            ) {
+                Text(
+                    text = if (rootAvailable) "Authorize Root (su)" else "Coba Izin Root (su)",
+                    color = StatusWarning
+                )
             }
         }
     )
