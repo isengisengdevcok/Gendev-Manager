@@ -260,3 +260,4 @@ jobs:
             release_bundle/*.apk
             release_bundle/metadata.json
           fail_on_unmatched_files: true
+          
