@@ -42,13 +42,15 @@ gradle :app:assembleDebug
 ```
 
 ## GitHub Actions CI/CD
-Configure repository secrets to produce signed production releases automatically on push to `main`/`master`:
-- `ANDROID_KEYSTORE_BASE64`
-- `ANDROID_KEYSTORE_PASSWORD`
-- `ANDROID_KEY_ALIAS`
-- `ANDROID_KEY_PASSWORD`
+Every push to `main` or `master` automatically builds, tests, lints, calculates SHA-256, and publishes a **GitHub Release** with the `.apk` attached.
 
-When signing secrets are omitted, the workflow publishes a clearly labeled debug APK without misrepresenting it as a signed production release.
+- **Automatic Signed Production Releases (`GENDEV-MANAGER-release-signed.apk`)**: Configure these 4 repository secrets in **Settings → Secrets and variables → Actions**:
+  - `ANDROID_KEYSTORE_BASE64`
+  - `ANDROID_KEYSTORE_PASSWORD`
+  - `ANDROID_KEY_ALIAS`
+  - `ANDROID_KEY_PASSWORD`
+- **One-Command Secret Setup**: Run `bash .github/scripts/setup_github_signing_secrets.sh` (with `gh auth login`) to automatically generate a fresh RSA-2048 keystore and upload all 4 secrets to your GitHub repository.
+- **Zero-Config Fallback (`GENDEV-MANAGER-debug.apk`)**: When signing secrets are omitted, the pipeline still publishes a verified, installable debug `.apk` to GitHub Releases without mislabeling it as a signed production release.
 
 ## License
 Free and Open Source Software — 100% Free, No Ads, No Subscriptions.

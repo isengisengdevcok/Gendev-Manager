@@ -112,7 +112,7 @@ jobs:
           fi
 
           if [ -n "$ANDROID_KEYSTORE_BASE64" ] && [ -n "$ANDROID_KEYSTORE_PASSWORD" ] && [ -n "$ANDROID_KEY_ALIAS" ]; then
-            EFFECTIVE_KEY_PASS="${ANDROID_KEY_PASSWORD:-$ANDROID_KEYSTORE_PASSWORD}"
+            export EFFECTIVE_KEY_PASS="${ANDROID_KEY_PASSWORD:-$ANDROID_KEYSTORE_PASSWORD}"
             printf '%s' "$ANDROID_KEYSTORE_BASE64" | tr -d '\r\n\t ' | base64 -d > /tmp/release-signing.jks
 
             rm -f /tmp/agp-temp-upload.jks
@@ -223,6 +223,8 @@ jobs:
     needs: build
     if: success() && github.event_name != 'pull_request'
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
 
     steps:
       - name: Download APK Bundle Artifact
