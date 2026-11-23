@@ -61,6 +61,49 @@ data class DeviceEnvironmentInfo(
 
 class DeviceEnvironmentManager(private val context: Context) {
 
+    @Volatile
+    private var cachedInfo: DeviceEnvironmentInfo? = null
+
+    /**
+     * Ultra-fast snapshot for cold-boot Home screen rendering with zero subprocess spawns.
+     */
+    fun inspectFastPreview(): DeviceEnvironmentInfo {
+        cachedInfo?.let { return it }
+        val storage = readStorageStats(
+            runCatching { Environment.getExternalStorageDirectory() }.getOrNull()
+                ?: Environment.getDataDirectory()
+        )
+        val (totalRam, availRam) = readRamStats()
+        val abis = Build.SUPPORTED_ABIS?.toList().orEmpty()
+        val allFilesGranted = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            runCatching { Environment.isExternalStorageManager() }.getOrDefault(false)
+        } else {
+            true
+        }
+        val workspace = File(context.filesDir, "GENDEV_Workspace")
+        return DeviceEnvironmentInfo(
+            manufacturer = Build.MANUFACTURER.replaceFirstChar { it.uppercase() },
+            brand = Build.BRAND.replaceFirstChar { it.uppercase() },
+            model = Build.MODEL,
+            deviceName = Build.DEVICE,
+            androidVersion = Build.VERSION.RELEASE ?: "Unknown",
+            sdkLevel = Build.VERSION.SDK_INT,
+            securityPatch = Build.VERSION.SECURITY_PATCH,
+            supportedAbis = abis,
+            primaryArchitecture = abis.firstOrNull() ?: System.getProperty("os.arch").orEmpty(),
+            internalStorage = storage,
+            totalRamBytes = totalRam,
+            availableRamBytes = availRam,
+            rootAvailable = false,
+            suBinaryPath = null,
+            rootImplementation = RootImplementation.NONE,
+            shizukuInstalled = false,
+            allFilesAccessGranted = allFilesGranted,
+            workspaceDir = workspace,
+            supportedOperations = emptyList()
+        )
+    }
+
     fun inspectEnvironment(): DeviceEnvironmentInfo {
         val discoveredSu = findSuBinary()
         val rootImpl = detectRootImplementation(discoveredSu)
@@ -73,7 +116,10 @@ class DeviceEnvironmentManager(private val context: Context) {
             true
         }
 
-        val storage = readStorageStats(Environment.getDataDirectory())
+        val storage = readStorageStats(
+            runCatching { Environment.getExternalStorageDirectory() }.getOrNull()
+                ?: Environment.getDataDirectory()
+        )
         val (totalRam, availRam) = readRamStats()
         val abis = Build.SUPPORTED_ABIS?.toList().orEmpty()
         val primaryArch = abis.firstOrNull() ?: System.getProperty("os.arch").orEmpty()
@@ -111,7 +157,7 @@ class DeviceEnvironmentManager(private val context: Context) {
             allFilesAccessGranted = allFilesGranted,
             workspaceDir = workspace,
             supportedOperations = operations
-        )
+        ).also { cachedInfo = it }
     }
 
     fun readStorageStats(targetDir: File): StorageStats {

@@ -33,6 +33,7 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.example.BuildConfig
 import com.example.core.common.AppContainer
 import com.example.core.data.AiProviderMode
+import com.example.core.data.FileDisplaySize
 import com.example.core.data.GenDevSettings
 import com.example.core.ui.GenDevGlassCard
 import com.example.core.ui.KeyValueRow
@@ -46,12 +47,22 @@ fun SettingsScreen(container: AppContainer) {
     val scope = rememberCoroutineScope()
     val settings by container.settingsDataStore.settingsFlow.collectAsStateWithLifecycle(GenDevSettings())
 
+    var geminiKey by remember { mutableStateOf(settings.geminiApiKey) }
+    var geminiModel by remember { mutableStateOf(settings.geminiModel) }
     var customEndpoint by remember { mutableStateOf(settings.customAiEndpoint) }
     var customModel by remember { mutableStateOf(settings.customAiModel) }
     var customKey by remember { mutableStateOf(settings.customAiApiKey) }
     var savedBanner by remember { mutableStateOf<String?>(null) }
 
-    LaunchedEffect(settings.customAiEndpoint, settings.customAiModel, settings.customAiApiKey) {
+    LaunchedEffect(
+        settings.geminiApiKey,
+        settings.geminiModel,
+        settings.customAiEndpoint,
+        settings.customAiModel,
+        settings.customAiApiKey
+    ) {
+        geminiKey = settings.geminiApiKey
+        geminiModel = settings.geminiModel
         customEndpoint = settings.customAiEndpoint
         customModel = settings.customAiModel
         customKey = settings.customAiApiKey
@@ -114,35 +125,52 @@ fun SettingsScreen(container: AppContainer) {
 
         item {
             GenDevGlassCard {
-                Text("File Manager & Safety", style = MaterialTheme.typography.titleMedium)
+                Text("File Manager & Tampilan Daftar", style = MaterialTheme.typography.titleMedium)
                 Spacer(modifier = Modifier.height(6.dp))
                 ToggleRow(
                     title = "Dual-Pane View by Default",
-                    subtitle = "MT-style dual panes across phone and tablet",
+                    subtitle = "Panel Kiri (Biasa) & Panel Kanan (Root) berdampingan",
                     checked = settings.dualPaneEnabled,
                     onCheckedChange = { scope.launch { container.settingsDataStore.setDualPane(it) } }
                 )
                 ToggleRow(
                     title = "Show Hidden Dotfiles",
-                    subtitle = "Display .git, .nomedia, and hidden configuration files",
+                    subtitle = "Tampilkan .git, .nomedia, dan file tersembunyi",
                     checked = settings.showHiddenFiles,
                     onCheckedChange = { scope.launch { container.settingsDataStore.setShowHidden(it) } }
                 )
                 ToggleRow(
                     title = "Automatic Backup Before Edits",
-                    subtitle = "Copies original files to Backups/ before saving or deleting",
+                    subtitle = "Salin file asli ke Backups/ sebelum menyimpan atau menghapus",
                     checked = settings.autoBackupBeforeEdit,
                     onCheckedChange = { scope.launch { container.settingsDataStore.setAutoBackup(it) } }
                 )
+                Spacer(modifier = Modifier.height(8.dp))
+                Text("Ukuran Tampilan File", style = MaterialTheme.typography.titleSmall)
+                FileDisplaySize.entries.forEach { sz ->
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clickable { scope.launch { container.settingsDataStore.setFileDisplaySize(sz) } }
+                            .padding(vertical = 3.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        RadioButton(
+                            selected = settings.fileDisplaySize == sz,
+                            onClick = { scope.launch { container.settingsDataStore.setFileDisplaySize(sz) } }
+                        )
+                        Text(sz.label, style = MaterialTheme.typography.bodyMedium)
+                    }
+                }
             }
         }
 
         item {
             GenDevGlassCard {
-                Text("GENDEV AI Engine (Hybrid)", style = MaterialTheme.typography.titleMedium)
+                Text("GENDEV AI Engine (Firebase + Manual Key)", style = MaterialTheme.typography.titleMedium)
                 Spacer(modifier = Modifier.height(4.dp))
                 Text(
-                    "Cloud modes require internet connectivity. Offline Analyzer works with zero network.",
+                    "Gunakan Firebase AI Logic otomatis atau masukkan Gemini API Key pribadi Anda untuk APK standalone.",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
@@ -167,6 +195,39 @@ fun SettingsScreen(container: AppContainer) {
                                 color = MaterialTheme.colorScheme.onSurfaceVariant
                             )
                         }
+                    }
+                }
+
+                if (settings.aiProviderMode == AiProviderMode.GEMINI_API_KEY || settings.aiProviderMode == AiProviderMode.FIREBASE_HYBRID) {
+                    Spacer(modifier = Modifier.height(8.dp))
+                    OutlinedTextField(
+                        value = geminiKey,
+                        onValueChange = { geminiKey = it },
+                        label = { Text("Gemini API Key (AIza...)") },
+                        visualTransformation = PasswordVisualTransformation(),
+                        singleLine = true,
+                        modifier = Modifier.fillMaxWidth()
+                    )
+                    Spacer(modifier = Modifier.height(6.dp))
+                    OutlinedTextField(
+                        value = geminiModel,
+                        onValueChange = { geminiModel = it },
+                        label = { Text("Gemini Model (contoh: gemini-2.5-flash)") },
+                        singleLine = true,
+                        modifier = Modifier.fillMaxWidth()
+                    )
+                    Spacer(modifier = Modifier.height(8.dp))
+                    Button(onClick = {
+                        scope.launch {
+                            container.settingsDataStore.updateGeminiKeyConfig(
+                                apiKey = geminiKey,
+                                model = geminiModel,
+                                switchToKeyMode = geminiKey.isNotBlank()
+                            )
+                            savedBanner = "Gemini API Key disimpan lokal & siap digunakan."
+                        }
+                    }) {
+                        Text("Simpan Gemini Key")
                     }
                 }
 
@@ -205,10 +266,11 @@ fun SettingsScreen(container: AppContainer) {
                     }) {
                         Text("Save Provider Config")
                     }
-                    savedBanner?.let {
-                        Spacer(modifier = Modifier.height(4.dp))
-                        Text(it, style = MaterialTheme.typography.labelSmall, color = CyanSecondary)
-                    }
+                }
+
+                savedBanner?.let {
+                    Spacer(modifier = Modifier.height(6.dp))
+                    Text(it, style = MaterialTheme.typography.labelSmall, color = CyanSecondary)
                 }
             }
         }

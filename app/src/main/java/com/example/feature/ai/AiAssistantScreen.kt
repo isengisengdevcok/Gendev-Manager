@@ -28,14 +28,19 @@ import androidx.compose.material.icons.filled.AutoAwesome
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.filled.DeleteOutline
+import androidx.compose.material.icons.filled.Key
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.AssistChip
+import androidx.compose.material3.FilterChip
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.RadioButton
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -47,6 +52,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.example.core.ai.AiStreamEvent
@@ -75,13 +81,14 @@ fun AiAssistantScreen(container: AppContainer) {
     var streamingText by remember { mutableStateOf<String?>(null) }
     var streamingProvider by remember { mutableStateOf("") }
     var errorNotice by remember { mutableStateOf<String?>(null) }
+    var showApiKeyDialog by remember { mutableStateOf(false) }
 
     val quickPrompts = listOf(
-        "Audit this AndroidManifest.xml for security risks and exported components" to "Audit Manifest",
-        "Explain the attached Smali bytecode step-by-step" to "Explain Smali",
-        "Analyze this Android crash log / Gradle error and suggest fixes" to "Diagnose Crash",
-        "Generate a hardened Android network_security_config.xml template" to "XML Template",
-        "Explain common Magisk / KernelSU root shell diagnostics safely" to "Root Cmds"
+        "Audit AndroidManifest.xml ini untuk risiko keamanan dan komponen exported" to "Audit Manifest",
+        "Jelaskan kode Smali terlampir langkah demi langkah" to "Jelaskan Smali",
+        "Analisa crash log / error Gradle ini dan berikan perbaikannya" to "Diagnosa Crash",
+        "Buat template network_security_config.xml Android yang aman" to "XML Template",
+        "Jelaskan perintah diagnostik root shell Magisk / KernelSU yang aman" to "Root Cmds"
     )
 
     fun sendPrompt(rawPrompt: String) {
@@ -102,7 +109,8 @@ fun AiAssistantScreen(container: AppContainer) {
             )
             streamingText = ""
             streamingProvider = when (settings.aiProviderMode) {
-                AiProviderMode.FIREBASE_HYBRID -> "Gemini 3.8 Flash..."
+                AiProviderMode.FIREBASE_HYBRID -> "Gemini 3.8 Flash (Firebase)..."
+                AiProviderMode.GEMINI_API_KEY -> "Gemini Key (${settings.geminiModel})..."
                 AiProviderMode.OFFLINE_ONLY -> "Offline Static Analyzer..."
                 AiProviderMode.CUSTOM_ENDPOINT -> "Custom Endpoint..."
             }
@@ -151,23 +159,44 @@ fun AiAssistantScreen(container: AppContainer) {
                     horizontalArrangement = Arrangement.SpaceBetween,
                     verticalAlignment = Alignment.CenterVertically
                 ) {
-                    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Row(
+                        modifier = Modifier.weight(1f),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
                         Icon(Icons.Filled.AutoAwesome, contentDescription = null, tint = VioletPrimary)
                         Column {
                             Text("GENDEV AI Studio", style = MaterialTheme.typography.titleLarge)
                             Text(
                                 text = when (settings.aiProviderMode) {
-                                    AiProviderMode.FIREBASE_HYBRID -> "Cloud Gemini 3.8 Flash (Firebase) + Offline Fallback"
+                                    AiProviderMode.FIREBASE_HYBRID -> "Firebase Gemini 3.8 Flash + Fallback"
+                                    AiProviderMode.GEMINI_API_KEY -> "Gemini API Key (${settings.geminiModel})"
                                     AiProviderMode.OFFLINE_ONLY -> "100% Offline Static Engineering Analyzer"
-                                    AiProviderMode.CUSTOM_ENDPOINT -> "External Custom Endpoint (${settings.customAiModel})"
+                                    AiProviderMode.CUSTOM_ENDPOINT -> "Custom Endpoint (${settings.customAiModel})"
                                 },
                                 style = MaterialTheme.typography.bodySmall,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant
                             )
                         }
                     }
-                    IconButton(onClick = { scope.launch { container.database.aiMessageDao().clearAll() } }) {
-                        Icon(Icons.Filled.DeleteOutline, contentDescription = "Clear AI History")
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        FilterChip(
+                            selected = settings.aiProviderMode == AiProviderMode.GEMINI_API_KEY && settings.geminiApiKey.isNotBlank(),
+                            onClick = { showApiKeyDialog = true },
+                            leadingIcon = {
+                                Icon(Icons.Filled.Key, contentDescription = null, modifier = Modifier.size(16.dp))
+                            },
+                            label = {
+                                Text(
+                                    if (settings.geminiApiKey.isNotBlank()) "Key Aktif" else "API Key",
+                                    style = MaterialTheme.typography.labelSmall
+                                )
+                            },
+                            modifier = Modifier.testTag("ai_api_key_btn")
+                        )
+                        IconButton(onClick = { scope.launch { container.database.aiMessageDao().clearAll() } }) {
+                            Icon(Icons.Filled.DeleteOutline, contentDescription = "Clear AI History")
+                        }
                     }
                 }
 
@@ -214,7 +243,17 @@ fun AiAssistantScreen(container: AppContainer) {
 
                 errorNotice?.let { err ->
                     Spacer(modifier = Modifier.height(6.dp))
-                    Text(text = err, style = MaterialTheme.typography.labelSmall, color = StatusWarning)
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clip(RoundedCornerShape(8.dp))
+                            .background(StatusWarning.copy(alpha = 0.14f))
+                            .clickable { showApiKeyDialog = true }
+                            .padding(horizontal = 10.dp, vertical = 6.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text(text = err, style = MaterialTheme.typography.labelSmall, color = StatusWarning)
+                    }
                 }
 
                 if (streamingText != null) {
@@ -227,8 +266,8 @@ fun AiAssistantScreen(container: AppContainer) {
         if (messages.isEmpty() && streamingText == null) {
             EmptyStatePanel(
                 icon = Icons.Filled.AutoAwesome,
-                title = "GENDEV AI Ready",
-                message = "Attach an APK Manifest, Smali class, or Logcat dump from any screen—or tap a quick engineering prompt above.",
+                title = "GENDEV AI Siap Digunakan",
+                message = "Terhubung otomatis ke Firebase Gemini, atau ketuk tombol 'API Key' di kanan atas untuk memakai Gemini API Key pribadi Anda secara langsung.",
                 modifier = Modifier.weight(1f)
             )
         } else {
@@ -298,7 +337,7 @@ fun AiAssistantScreen(container: AppContainer) {
                 OutlinedTextField(
                     value = inputPrompt,
                     onValueChange = { inputPrompt = it },
-                    placeholder = { Text("Ask about APK, Smali, Manifest, Gradle, or Shell...") },
+                    placeholder = { Text("Tanya soal APK, Smali, Manifest, Gradle, atau Shell...") },
                     maxLines = 3,
                     modifier = Modifier.weight(1f).testTag("ai_prompt_input")
                 )
@@ -311,5 +350,78 @@ fun AiAssistantScreen(container: AppContainer) {
                 }
             }
         }
+    }
+
+    if (showApiKeyDialog) {
+        var selectedMode by remember(settings.aiProviderMode) { mutableStateOf(settings.aiProviderMode) }
+        var keyInput by remember(settings.geminiApiKey) { mutableStateOf(settings.geminiApiKey) }
+        var modelInput by remember(settings.geminiModel) { mutableStateOf(settings.geminiModel) }
+        AlertDialog(
+            onDismissRequest = { showApiKeyDialog = false },
+            title = { Text("Konfigurasi GENDEV AI & API Key") },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Text(
+                        text = "Pilih mode AI. Anda bisa memakai Firebase otomatis atau memasukkan Gemini API Key manual dari Google AI Studio agar berfungsi di APK manapun.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                    AiProviderMode.entries.forEach { mode ->
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clickable { selectedMode = mode }
+                                .padding(vertical = 2.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            RadioButton(selected = selectedMode == mode, onClick = { selectedMode = mode })
+                            Text(mode.label, style = MaterialTheme.typography.labelLarge)
+                        }
+                    }
+                    OutlinedTextField(
+                        value = keyInput,
+                        onValueChange = { keyInput = it },
+                        label = { Text("Gemini API Key (AIza...)") },
+                        visualTransformation = PasswordVisualTransformation(),
+                        singleLine = true,
+                        modifier = Modifier.fillMaxWidth().testTag("gemini_api_key_input")
+                    )
+                    OutlinedTextField(
+                        value = modelInput,
+                        onValueChange = { modelInput = it },
+                        label = { Text("Model Gemini (default: gemini-2.5-flash)") },
+                        singleLine = true,
+                        modifier = Modifier.fillMaxWidth()
+                    )
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { showApiKeyDialog = false }) { Text("Batal") }
+            },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        scope.launch {
+                            val finalMode = if (keyInput.isNotBlank() && selectedMode == AiProviderMode.FIREBASE_HYBRID) {
+                                AiProviderMode.GEMINI_API_KEY
+                            } else {
+                                selectedMode
+                            }
+                            container.settingsDataStore.updateAiProviderMode(finalMode)
+                            container.settingsDataStore.updateGeminiKeyConfig(
+                                apiKey = keyInput,
+                                model = modelInput,
+                                switchToKeyMode = finalMode == AiProviderMode.GEMINI_API_KEY
+                            )
+                            errorNotice = null
+                            showApiKeyDialog = false
+                        }
+                    },
+                    modifier = Modifier.testTag("save_ai_key_btn")
+                ) {
+                    Text("Simpan & Aktifkan")
+                }
+            }
+        )
     }
 }

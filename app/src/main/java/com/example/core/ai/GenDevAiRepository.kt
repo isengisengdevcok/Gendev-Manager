@@ -35,11 +35,7 @@ class GenDevAiRepository {
         Firebase.ai.generativeModel(
             modelName = "gemini-3.8-flash",
             systemInstruction = content {
-                text(
-                    """You are GENDEV AI, an expert senior Android systems, APK reverse-engineering, DEX/Smali, Gradle, and security assistant inside GENDEV MANAGER.
-Provide concise, accurate, actionable technical guidance.
-Safety rules: Never advise executing destructive root commands without explicit user review, never invent fake APK signatures, and clearly label any command before the user runs it in Terminal."""
-                )
+                text(SYSTEM_PROMPT)
             }
         )
     }
@@ -68,6 +64,41 @@ Safety rules: Never advise executing destructive root commands without explicit 
             AiProviderMode.OFFLINE_ONLY -> {
                 val offline = OfflineEngineeringAnalyzer.analyzeLocally(prompt, attachedContext)
                 emit(AiStreamEvent.Completed(offline, "Offline Static Analyzer"))
+            }
+
+            AiProviderMode.GEMINI_API_KEY -> {
+                if (settings.geminiApiKey.isBlank()) {
+                    val offline = OfflineEngineeringAnalyzer.analyzeLocally(prompt, attachedContext)
+                    emit(
+                        AiStreamEvent.Failed(
+                            errorMessage = "Gemini API Key belum diisi. Ketuk tombol 'API Key' di atas atau buka Settings untuk memasukkan key Anda.",
+                            fallbackText = offline
+                        )
+                    )
+                } else {
+                    try {
+                        val modelId = settings.geminiModel.ifBlank { "gemini-2.5-flash" }
+                        val reply = withTimeout(60_000L) {
+                            callGeminiApiKeyRest(
+                                apiKey = settings.geminiApiKey,
+                                modelName = modelId,
+                                prompt = fullPrompt
+                            )
+                        }
+                        emit(AiStreamEvent.Completed(reply, "Gemini API Key ($modelId)"))
+                    } catch (e: CancellationException) {
+                        throw e
+                    } catch (e: Exception) {
+                        Log.e(TAG, "Gemini REST API key call failed", e)
+                        val offline = OfflineEngineeringAnalyzer.analyzeLocally(prompt, attachedContext)
+                        emit(
+                            AiStreamEvent.Failed(
+                                errorMessage = e.localizedMessage ?: "Gemini API Key request failed.",
+                                fallbackText = offline
+                            )
+                        )
+                    }
+                }
             }
 
             AiProviderMode.CUSTOM_ENDPOINT -> {
@@ -120,38 +151,111 @@ Safety rules: Never advise executing destructive root commands without explicit 
                     if (sb.isNotBlank()) {
                         emit(AiStreamEvent.Completed(sb.toString(), "Gemini 3.8 Flash (Firebase)"))
                     } else {
-                        val offline = OfflineEngineeringAnalyzer.analyzeLocally(prompt, attachedContext)
-                        emit(
-                            AiStreamEvent.Failed(
-                                errorMessage = "Gemini returned an empty response. Offline static analysis provided.",
-                                fallbackText = offline
-                            )
-                        )
+                        handleFirebaseFallback(prompt, attachedContext, fullPrompt, settings, "Gemini returned an empty response.")
+                            .also { emit(it) }
                     }
                 } catch (e: TimeoutCancellationException) {
                     Log.e(TAG, "Firebase AI generation timed out", e)
-                    val offline = OfflineEngineeringAnalyzer.analyzeLocally(prompt, attachedContext)
-                    emit(
-                        AiStreamEvent.Failed(
-                            errorMessage = "Cloud AI request timed out after 60s. Offline static analysis provided.",
-                            fallbackText = offline
-                        )
-                    )
+                    emit(handleFirebaseFallback(prompt, attachedContext, fullPrompt, settings, "Firebase AI timed out after 60s."))
                 } catch (e: CancellationException) {
                     throw e
                 } catch (e: Exception) {
                     Log.e(TAG, "Firebase AI generation failed", e)
-                    val offline = OfflineEngineeringAnalyzer.analyzeLocally(prompt, attachedContext)
-                    emit(
-                        AiStreamEvent.Failed(
-                            errorMessage = e.localizedMessage ?: "Cloud AI unavailable. Offline static analysis provided.",
-                            fallbackText = offline
-                        )
-                    )
+                    val msg = e.localizedMessage ?: "Cloud AI unavailable."
+                    emit(handleFirebaseFallback(prompt, attachedContext, fullPrompt, settings, msg))
                 }
             }
         }
     }.flowOn(Dispatchers.IO)
+
+    private suspend fun handleFirebaseFallback(
+        prompt: String,
+        attachedContext: String?,
+        fullPrompt: String,
+        settings: GenDevSettings,
+        firebaseError: String
+    ): AiStreamEvent {
+        if (settings.geminiApiKey.isNotBlank()) {
+            try {
+                val modelId = settings.geminiModel.ifBlank { "gemini-2.5-flash" }
+                val reply = withTimeout(60_000L) {
+                    callGeminiApiKeyRest(
+                        apiKey = settings.geminiApiKey,
+                        modelName = modelId,
+                        prompt = fullPrompt
+                    )
+                }
+                return AiStreamEvent.Completed(reply, "Gemini Key Fallback ($modelId)")
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                Log.e(TAG, "Gemini key fallback also failed", e)
+            }
+        }
+        val offline = OfflineEngineeringAnalyzer.analyzeLocally(prompt, attachedContext)
+        val hint = if (firebaseError.contains("403") || firebaseError.contains("App Check", ignoreCase = true)) {
+            "Firebase App Check belum tervalidasi di APK standalone. Ketuk 'API Key' di atas untuk memakai Gemini API Key pribadi Anda (gratis dari Google AI Studio)."
+        } else {
+            "$firebaseError Offline static analysis provided."
+        }
+        return AiStreamEvent.Failed(errorMessage = hint, fallbackText = offline)
+    }
+
+    private fun callGeminiApiKeyRest(
+        apiKey: String,
+        modelName: String,
+        prompt: String
+    ): String {
+        val cleanModel = modelName.trim().removePrefix("models/")
+        val url = "https://generativelanguage.googleapis.com/v1beta/models/$cleanModel:generateContent"
+        val bodyJson = JSONObject().apply {
+            put(
+                "system_instruction",
+                JSONObject().put("parts", JSONArray().put(JSONObject().put("text", SYSTEM_PROMPT)))
+            )
+            put(
+                "contents",
+                JSONArray().put(
+                    JSONObject().apply {
+                        put("role", "user")
+                        put("parts", JSONArray().put(JSONObject().put("text", prompt)))
+                    }
+                )
+            )
+        }
+        val req = Request.Builder()
+            .url(url)
+            .addHeader("x-goog-api-key", apiKey.trim())
+            .addHeader("Content-Type", "application/json")
+            .post(bodyJson.toString().toRequestBody("application/json".toMediaType()))
+            .build()
+
+        httpClient.newCall(req).execute().use { resp ->
+            val raw = resp.body?.string().orEmpty()
+            if (!resp.isSuccessful) {
+                val apiErrMsg = runCatching {
+                    JSONObject(raw).optJSONObject("error")?.optString("message")
+                }.getOrNull()
+                error(apiErrMsg?.takeIf { it.isNotBlank() } ?: "Gemini HTTP ${resp.code}: ${raw.take(240)}")
+            }
+            val parsed = JSONObject(raw)
+            val candidates = parsed.optJSONArray("candidates")
+            if (candidates != null && candidates.length() > 0) {
+                val parts = candidates.getJSONObject(0)
+                    .optJSONObject("content")
+                    ?.optJSONArray("parts")
+                if (parts != null && parts.length() > 0) {
+                    val out = StringBuilder()
+                    for (i in 0 until parts.length()) {
+                        val t = parts.getJSONObject(i).optString("text")
+                        if (t.isNotEmpty()) out.append(t)
+                    }
+                    if (out.isNotBlank()) return out.toString()
+                }
+            }
+            error("Gemini API returned no candidate text.")
+        }
+    }
 
     private fun callCustomOpenAiEndpoint(
         endpoint: String,
@@ -167,7 +271,7 @@ Safety rules: Never advise executing destructive root commands without explicit 
                     put(
                         JSONObject().apply {
                             put("role", "system")
-                            put("content", "You are GENDEV AI, an Android APK, DEX/Smali, and systems engineering assistant.")
+                            put("content", SYSTEM_PROMPT)
                         }
                     )
                     put(
@@ -200,5 +304,12 @@ Safety rules: Never advise executing destructive root commands without explicit 
             }
             error("Unexpected response payload from custom endpoint")
         }
+    }
+
+    companion object {
+        private const val SYSTEM_PROMPT =
+            """You are GENDEV AI, an expert senior Android systems, APK reverse-engineering, DEX/Smali, Gradle, and security assistant inside GENDEV MANAGER.
+Provide concise, accurate, actionable technical guidance (respond in Indonesian or English matching the user's language).
+Safety rules: Never advise executing destructive root commands without explicit user review, never invent fake APK signatures, and clearly label any command before the user runs it in Terminal."""
     }
 }

@@ -104,15 +104,22 @@ df -h /data
             )
         }
 
-        // Export a copy of our own running APK into Samples if accessible so users always have a real APK ready to inspect
+        // Heavy self-APK copy deferred out of cold launch for instant Home startup
+    }
+
+    suspend fun ensureSelfApkSample(): File? = withContext(Dispatchers.IO) {
+        val samplesDir = File(workspaceDir, "Samples").apply { mkdirs() }
+        val targetSelfApk = File(samplesDir, "GENDEV_Manager_self.apk")
+        if (targetSelfApk.exists()) return@withContext targetSelfApk
         try {
             val selfApk = File(context.applicationInfo.sourceDir)
-            val targetSelfApk = File(samplesDir, "GENDEV_Manager_self.apk")
-            if (selfApk.exists() && selfApk.canRead() && !targetSelfApk.exists()) {
+            if (selfApk.exists() && selfApk.canRead()) {
                 selfApk.copyTo(targetSelfApk, overwrite = false)
+                return@withContext targetSelfApk
             }
         } catch (_: Exception) {
         }
+        null
     }
 
     fun getPhoneStorageDirectory(): File? =
