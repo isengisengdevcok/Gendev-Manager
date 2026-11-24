@@ -67,6 +67,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.example.core.apk.InstalledAppSummary
 import com.example.core.common.AppContainer
+import com.example.core.common.AppLogStore
 import com.example.core.common.HashUtils
 import com.example.core.dex.DexClassInfo
 import com.example.core.dex.DexParsedFile
@@ -164,6 +165,7 @@ fun DexEditorScreen(
                 } ?: parsed.classes.firstOrNull()
                 selectClassAndDisassemble(parsed, firstInteresting)
             }.onFailure { err ->
+                AppLogStore.e("DexEditor", "DEX load failed ($path/$chosenEntry): ${err.localizedMessage}", err)
                 statusMsg = "Gagal memuat DEX: ${err.localizedMessage}"
             }
             isLoading = false
@@ -672,6 +674,7 @@ fun DexEditorScreen(
                                                     lastPatchedDexFile = outDex
                                                     statusMsg = "Berhasil patch DEX & recalculate SHA-1/Adler32 -> ${outDex.name}"
                                                 }.onFailure { err ->
+                                                    AppLogStore.e("DexEditor", "DEX patch failed ($activeDexEntry): ${err.localizedMessage}", err)
                                                     statusMsg = "Patch gagal: ${err.localizedMessage}"
                                                 }
                                                 isLoading = false

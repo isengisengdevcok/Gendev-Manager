@@ -126,4 +126,58 @@ class GenDevComposeUiTests {
         composeRule.onNodeWithTag("gemini_api_key_input").assertIsDisplayed()
         composeRule.onNodeWithTag("test_ai_key_btn").performScrollTo().assertIsDisplayed()
     }
+
+    @Test
+    fun `large html file activates virtual chunk mode banner without crash`() {
+        val container = AppContainer(context)
+        runBlocking { container.storageRepository.ensureWorkspaceInitialized() }
+        val heavyHtml = File(container.storageRepository.workspaceDir, "heavy_test.html")
+        val content = buildString {
+            append("<!DOCTYPE html><html><body>\n")
+            repeat(620) { idx ->
+                append("<section class=\"card\">Row #$idx — payload HTML testing large file</section>\n")
+            }
+            append("</body></html>")
+        }
+        heavyHtml.writeText(content)
+        container.sharedBus.openFileInEditor(heavyHtml.absolutePath)
+
+        composeRule.setContent {
+            GenDevManagerTheme {
+                ResourceEditorScreen(
+                    container = container,
+                    onAskAi = { _, _ -> }
+                )
+            }
+        }
+
+        composeRule.waitUntil(6_000) {
+            composeRule.onAllNodesWithTag("large_file_warning_banner").fetchSemanticsNodes().isNotEmpty()
+        }
+        composeRule.onNodeWithTag("large_file_warning_banner").assertIsDisplayed()
+        composeRule.onNodeWithTag("code_editor_input").assertIsDisplayed()
+        heavyHtml.delete()
+    }
+
+    @Test
+    fun `ai assistant source log dialog displays recorded errors`() {
+        val container = AppContainer(context)
+        com.example.core.common.AppLogStore.init(context)
+        com.example.core.common.AppLogStore.clearLogs()
+        com.example.core.common.AppLogStore.e("HtmlEditor", "Recorded test exception for AI")
+
+        composeRule.setContent {
+            GenDevManagerTheme {
+                AiAssistantScreen(container = container)
+            }
+        }
+
+        composeRule.waitForIdle()
+        composeRule.onNodeWithTag("ai_source_log_btn").performScrollTo().performClick()
+        composeRule.waitForIdle()
+        composeRule.onNodeWithText("Source Log & Crash Recorder").assertIsDisplayed()
+        composeRule.onNodeWithText("Recorded test exception for AI").assertIsDisplayed()
+        composeRule.onNodeWithTag("analyze_source_log_ai_btn").assertIsDisplayed()
+        com.example.core.common.AppLogStore.clearLogs()
+    }
 }

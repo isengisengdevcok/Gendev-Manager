@@ -363,5 +363,52 @@ class GenDevRobolectricTests {
         )
         assertEquals(longText.length, highlighted.length)
         assertEquals(longText, highlighted.text)
+
+        val plainDisabled = com.example.core.editor.SyntaxHighlighter.highlight(
+            code = "<html><body><h1>Hello</h1></body></html>",
+            language = EditorLanguage.HTML,
+            baseColor = androidx.compose.ui.graphics.Color.White,
+            highlightingEnabled = false
+        )
+        assertEquals("<html><body><h1>Hello</h1></body></html>", plainDisabled.text)
+    }
+
+    @Test
+    fun `html chunking preserves exact round trip for multiline and minified html`() {
+        val multiLineHtml = buildString {
+            append("<!DOCTYPE html>\n<html>\n\n<body>\n")
+            for (i in 1..620) {
+                append("  <div id=\"row-$i\">Line $i</div>\n")
+                if (i % 150 == 0) append("\n")
+            }
+            append("</body>\n</html>\n")
+        }
+        val multiChunks = com.example.feature.resourceeditor.splitIntoSafeChunks(multiLineHtml)
+        assertTrue(multiChunks.size >= 6)
+        assertEquals(multiLineHtml, com.example.feature.resourceeditor.rebuildTextFromChunks(multiChunks))
+
+        val minifiedHtml = "<html><body>" + "<span>block</span>".repeat(1600) + "</body></html>"
+        assertTrue(minifiedHtml.length > 25_000)
+        val minChunks = com.example.feature.resourceeditor.splitIntoSafeChunks(minifiedHtml)
+        assertTrue(minChunks.size >= 3)
+        assertEquals(minifiedHtml, com.example.feature.resourceeditor.rebuildTextFromChunks(minChunks))
+    }
+
+    @Test
+    fun `app log store records errors and generates ai diagnostic snapshot`() {
+        com.example.core.common.AppLogStore.init(context)
+        com.example.core.common.AppLogStore.clearLogs()
+        com.example.core.common.AppLogStore.updateContext("code_editor", "/tmp/heavy.html")
+        com.example.core.common.AppLogStore.e(
+            source = "ResourceEditor",
+            message = "Simulated OOM guard on heavy.html",
+            throwable = IllegalStateException("Test trace")
+        )
+        assertTrue(com.example.core.common.AppLogStore.errorCount() >= 1)
+        val snapshot = com.example.core.common.AppLogStore.buildAiDiagnosticSnapshot()
+        assertTrue(snapshot.contains("GENDEV MANAGER SOURCE LOG DIAGNOSTIC"))
+        assertTrue(snapshot.contains("Simulated OOM guard on heavy.html"))
+        assertTrue(snapshot.contains("/tmp/heavy.html"))
+        com.example.core.common.AppLogStore.clearLogs()
     }
 }

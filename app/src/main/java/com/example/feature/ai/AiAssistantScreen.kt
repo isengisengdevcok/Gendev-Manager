@@ -37,6 +37,7 @@ import androidx.compose.material.icons.automirrored.filled.Send
 import androidx.compose.material.icons.filled.AttachFile
 import androidx.compose.material.icons.filled.AutoAwesome
 import androidx.compose.material.icons.filled.Bolt
+import androidx.compose.material.icons.filled.BugReport
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.filled.ContentPaste
@@ -79,6 +80,8 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.example.core.ai.AiStreamEvent
 import com.example.core.ai.GenDevAiRepository
 import com.example.core.common.AppContainer
+import com.example.core.common.AppLogLevel
+import com.example.core.common.AppLogStore
 import com.example.core.data.AiMessageEntity
 import com.example.core.data.AiProviderMode
 import com.example.core.data.GenDevSettings
@@ -102,6 +105,10 @@ fun AiAssistantScreen(container: AppContainer) {
     val settings by container.settingsDataStore.settingsFlow.collectAsStateWithLifecycle(GenDevSettings())
     val messages by container.database.aiMessageDao().observeMessages().collectAsStateWithLifecycle(emptyList())
     val attachedContext by container.sharedBus.attachedAiContext.collectAsStateWithLifecycle()
+    val appLogs by AppLogStore.logs.collectAsStateWithLifecycle()
+    val appErrorCount = remember(appLogs) {
+        appLogs.count { it.level == AppLogLevel.ERROR || it.level == AppLogLevel.CRASH }
+    }
 
     var inputPrompt by remember { mutableStateOf("") }
     var streamingText by remember { mutableStateOf<String?>(null) }
@@ -110,9 +117,12 @@ fun AiAssistantScreen(container: AppContainer) {
     var errorNotice by remember { mutableStateOf<String?>(null) }
     var showApiKeyDialog by remember { mutableStateOf(false) }
     var showKeyGuideDialog by remember { mutableStateOf(false) }
+    var showSourceLogDialog by remember { mutableStateOf(false) }
+    var includeSourceLogs by remember { mutableStateOf(true) }
     val listState = rememberLazyListState()
 
     val quickPrompts = listOf(
+        "Analisa Source Log error & Force Close aplikasi ini, identifikasi akar masalah per file/modul, dan buat daftar perbaikan pengembangan lanjutan" to "Analisa Error App",
         "Audit AndroidManifest.xml ini untuk risiko keamanan dan komponen exported" to "Audit Manifest",
         "Jelaskan kode Smali terlampir langkah demi langkah" to "Jelaskan Smali",
         "Analisa crash log / error Gradle ini dan berikan perbaikannya" to "Diagnosa Crash",
@@ -173,7 +183,8 @@ fun AiAssistantScreen(container: AppContainer) {
                     prompt = clean,
                     attachedContext = ctxSnapshot?.content,
                     settings = settings,
-                    recentHistory = recentHistory
+                    recentHistory = recentHistory,
+                    includeSourceLogs = includeSourceLogs
                 ).collect { event ->
                     when (event) {
                         is AiStreamEvent.Chunk -> {
@@ -281,6 +292,33 @@ fun AiAssistantScreen(container: AppContainer) {
                         },
                         label = { Text("Instruksi Key", style = MaterialTheme.typography.labelSmall) },
                         modifier = Modifier.testTag("ai_key_guide_btn")
+                    )
+                    AssistChip(
+                        onClick = { showSourceLogDialog = true },
+                        leadingIcon = {
+                            Icon(
+                                Icons.Filled.BugReport,
+                                contentDescription = null,
+                                tint = if (appErrorCount > 0) StatusDanger else CyanSecondary,
+                                modifier = Modifier.size(16.dp)
+                            )
+                        },
+                        label = {
+                            val badge = if (appErrorCount > 0) "$appErrorCount Err" else "${appLogs.size}"
+                            Text("Source Log ($badge)", style = MaterialTheme.typography.labelSmall)
+                        },
+                        modifier = Modifier.testTag("ai_source_log_btn")
+                    )
+                    FilterChip(
+                        selected = includeSourceLogs,
+                        onClick = { includeSourceLogs = !includeSourceLogs },
+                        label = {
+                            Text(
+                                if (includeSourceLogs) "Auto-Log AI ON" else "Auto-Log OFF",
+                                style = MaterialTheme.typography.labelSmall
+                            )
+                        },
+                        modifier = Modifier.testTag("ai_autolog_toggle_chip")
                     )
                 }
 
@@ -900,6 +938,192 @@ fun AiAssistantScreen(container: AppContainer) {
                             TextButton(onClick = { openAiStudioKeyUrl() }) { Text("Buka AI Studio") }
                             Spacer(modifier = Modifier.width(8.dp))
                             Button(onClick = { showKeyGuideDialog = false }) { Text("Tutup") }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    if (showSourceLogDialog) {
+        var logFilter by remember { mutableStateOf("ALL") }
+        val filteredLogs = remember(appLogs, logFilter) {
+            when (logFilter) {
+                "ERR" -> appLogs.filter { it.level == AppLogLevel.ERROR || it.level == AppLogLevel.CRASH }
+                "WARN" -> appLogs.filter { it.level == AppLogLevel.WARN || it.level == AppLogLevel.ERROR || it.level == AppLogLevel.CRASH }
+                else -> appLogs
+            }.reversed()
+        }
+
+        Dialog(
+            onDismissRequest = { showSourceLogDialog = false },
+            properties = DialogProperties(
+                usePlatformDefaultWidth = false,
+                decorFitsSystemWindows = false
+            )
+        ) {
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .statusBarsPadding()
+                    .navigationBarsPadding()
+                    .imePadding()
+                    .padding(horizontal = 16.dp, vertical = 14.dp),
+                contentAlignment = Alignment.Center
+            ) {
+                Surface(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .widthIn(max = 560.dp),
+                    shape = RoundedCornerShape(20.dp),
+                    color = MaterialTheme.colorScheme.surface,
+                    tonalElevation = 8.dp
+                ) {
+                    Column(modifier = Modifier.fillMaxWidth()) {
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(start = 18.dp, end = 8.dp, top = 12.dp, bottom = 6.dp),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Column(modifier = Modifier.weight(1f)) {
+                                Text(
+                                    "Source Log & Crash Recorder",
+                                    style = MaterialTheme.typography.titleMedium,
+                                    fontWeight = FontWeight.SemiBold
+                                )
+                                Text(
+                                    "$appErrorCount error/crash • ${appLogs.size} total catatan (tersimpan otomatis)",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = if (appErrorCount > 0) StatusDanger else MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                            }
+                            IconButton(onClick = { showSourceLogDialog = false }) {
+                                Icon(Icons.Filled.Close, contentDescription = "Tutup")
+                            }
+                        }
+
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(horizontal = 16.dp, vertical = 4.dp),
+                            horizontalArrangement = Arrangement.spacedBy(6.dp)
+                        ) {
+                            listOf("ALL" to "Semua", "ERR" to "Error/FC", "WARN" to "Warn+Err").forEach { (key, label) ->
+                                FilterChip(
+                                    selected = logFilter == key,
+                                    onClick = { logFilter = key },
+                                    label = { Text(label, style = MaterialTheme.typography.labelSmall) }
+                                )
+                            }
+                        }
+
+                        HorizontalDivider()
+
+                        LazyColumn(
+                            modifier = Modifier
+                                .weight(1f, fill = false)
+                                .fillMaxWidth()
+                                .padding(horizontal = 14.dp, vertical = 10.dp),
+                            verticalArrangement = Arrangement.spacedBy(6.dp)
+                        ) {
+                            if (filteredLogs.isEmpty()) {
+                                item {
+                                    Text(
+                                        "Belum ada error atau log yang tercatat pada filter ini.",
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                        modifier = Modifier.padding(vertical = 16.dp)
+                                    )
+                                }
+                            } else {
+                                items(filteredLogs, key = { it.id }) { entry ->
+                                    val levelColor = when (entry.level) {
+                                        AppLogLevel.CRASH, AppLogLevel.ERROR -> StatusDanger
+                                        AppLogLevel.WARN -> StatusWarning
+                                        AppLogLevel.INFO -> CyanSecondary
+                                    }
+                                    Column(
+                                        modifier = Modifier
+                                            .fillMaxWidth()
+                                            .clip(RoundedCornerShape(10.dp))
+                                            .background(MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.45f))
+                                            .padding(10.dp)
+                                    ) {
+                                        Row(
+                                            modifier = Modifier.fillMaxWidth(),
+                                            horizontalArrangement = Arrangement.SpaceBetween,
+                                            verticalAlignment = Alignment.CenterVertically
+                                        ) {
+                                            StatusBadgePill(label = "${entry.level.tag} • ${entry.source}", color = levelColor)
+                                            Text(
+                                                entry.formattedTime,
+                                                style = MaterialTheme.typography.labelSmall,
+                                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                                            )
+                                        }
+                                        Spacer(modifier = Modifier.height(4.dp))
+                                        Text(
+                                            entry.message,
+                                            style = MaterialTheme.typography.bodySmall,
+                                            fontFamily = JetBrainsMonoFontFamily
+                                        )
+                                        entry.stackTrace?.takeIf { it.isNotBlank() }?.let { stack ->
+                                            Spacer(modifier = Modifier.height(4.dp))
+                                            Text(
+                                                stack.take(500),
+                                                style = MaterialTheme.typography.labelSmall,
+                                                fontFamily = JetBrainsMonoFontFamily,
+                                                color = StatusWarning
+                                            )
+                                        }
+                                    }
+                                }
+                            }
+                        }
+
+                        HorizontalDivider()
+
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .horizontalScroll(rememberScrollState())
+                                .padding(horizontal = 14.dp, vertical = 10.dp),
+                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            TextButton(onClick = { AppLogStore.clearLogs() }) {
+                                Text("Hapus Log")
+                            }
+                            OutlinedButton(onClick = {
+                                val cm = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+                                cm.setPrimaryClip(ClipData.newPlainText("GENDEV Source Log", AppLogStore.buildAiDiagnosticSnapshot()))
+                            }) {
+                                Text("Salin")
+                            }
+                            OutlinedButton(onClick = {
+                                container.sharedBus.attachContextToAi(
+                                    "App Source Log (${appLogs.size})",
+                                    AppLogStore.buildAiDiagnosticSnapshot()
+                                )
+                                showSourceLogDialog = false
+                            }) {
+                                Text("Lampirkan")
+                            }
+                            Button(
+                                onClick = {
+                                    container.sharedBus.attachContextToAi(
+                                        "App Source Log (${appLogs.size})",
+                                        AppLogStore.buildAiDiagnosticSnapshot()
+                                    )
+                                    showSourceLogDialog = false
+                                    sendPrompt("Analisa Source Log & Force Close GENDEV MANAGER terlampir, jelaskan akar masalah dan rencana perbaikan kodenya.")
+                                },
+                                modifier = Modifier.testTag("analyze_source_log_ai_btn")
+                            ) {
+                                Text("Analisa AI")
+                            }
                         }
                     }
                 }

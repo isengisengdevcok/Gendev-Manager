@@ -4,6 +4,7 @@ import android.net.Uri
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.example.core.common.AppContainer
+import com.example.core.common.AppLogStore
 import com.example.core.common.HashUtils
 import com.example.core.data.BookmarkEntity
 import com.example.core.data.FileDisplaySize
@@ -698,6 +699,7 @@ class FileManagerViewModel(private val container: AppContainer) : ViewModel() {
                     }
                 }
                 .onFailure {
+                    AppLogStore.e("FileManager", "Archive inspect failed (${file.name}): ${it.localizedMessage}", it)
                     _uiState.update { state -> state.copy(isBusy = false) }
                     setStatus("Error arsip: ${it.localizedMessage}")
                 }
@@ -782,6 +784,7 @@ class FileManagerViewModel(private val container: AppContainer) : ViewModel() {
                 refreshPane(0)
                 refreshPane(1)
             }.onFailure { err ->
+                AppLogStore.e("FileManager", "Archive extract failed (${archive.name}): ${err.localizedMessage}", err)
                 _uiState.update { it.copy(isBusy = false) }
                 setStatus("Ekstraksi gagal: ${err.localizedMessage}")
             }

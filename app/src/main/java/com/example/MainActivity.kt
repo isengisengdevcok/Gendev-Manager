@@ -41,6 +41,7 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Modifier
@@ -59,6 +60,7 @@ import androidx.navigation.compose.currentBackStackEntryAsState
 import androidx.navigation.compose.rememberNavController
 import com.example.core.ai.configureAppCheck
 import com.example.core.common.AppContainer
+import com.example.core.common.AppLogStore
 import com.example.core.data.GenDevSettings
 import com.example.core.ui.theme.GenDevManagerTheme
 import com.example.feature.ai.AiAssistantScreen
@@ -96,6 +98,10 @@ class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
+        // Initialize persistent crash/error logger early
+        AppLogStore.init(applicationContext)
+        AppLogStore.i("MainActivity", "GENDEV MANAGER launched (v${BuildConfig.VERSION_NAME})")
+
         // STEP 1: Configure App Check with launch intent before any UI or Firebase operations
         configureAppCheck(this, intent)
 
@@ -122,6 +128,10 @@ fun GenDevRootShell(container: AppContainer) {
     val navController = rememberNavController()
     val backStackEntry by navController.currentBackStackEntryAsState()
     val currentRoute = backStackEntry?.destination?.route ?: GenDevRoutes.HOME
+
+    LaunchedEffect(currentRoute) {
+        AppLogStore.updateContext(currentRoute)
+    }
 
     val fileManagerVm: FileManagerViewModel = viewModel(
         factory = remember {

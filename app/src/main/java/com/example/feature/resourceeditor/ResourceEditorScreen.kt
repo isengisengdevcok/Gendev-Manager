@@ -17,14 +17,17 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.KeyboardArrowLeft
+import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
 import androidx.compose.material.icons.automirrored.filled.Redo
 import androidx.compose.material.icons.automirrored.filled.Undo
+import androidx.compose.material.icons.automirrored.filled.WrapText
 import androidx.compose.material.icons.filled.AutoAwesome
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Code
@@ -33,14 +36,19 @@ import androidx.compose.material.icons.filled.FindReplace
 import androidx.compose.material.icons.filled.Hexagon
 import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material.icons.filled.LockOpen
+import androidx.compose.material.icons.filled.Palette
 import androidx.compose.material.icons.filled.Save
 import androidx.compose.material.icons.filled.UnfoldLess
 import androidx.compose.material.icons.filled.UnfoldMore
+import androidx.compose.material.icons.filled.ViewStream
+import androidx.compose.material.icons.filled.Warning
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
+import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
@@ -66,9 +74,12 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.OffsetMapping
 import androidx.compose.ui.text.input.TransformedText
 import androidx.compose.ui.text.input.VisualTransformation
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.example.core.common.AppContainer
+import com.example.core.common.AppLogStore
+import com.example.core.common.HashUtils
 import com.example.core.data.EditorDraftEntity
 import com.example.core.editor.EditorLanguage
 import com.example.core.editor.EncodingDetector
@@ -81,15 +92,30 @@ import com.example.core.ui.theme.StatusSuccess
 import com.example.core.ui.theme.StatusWarning
 import com.example.core.ui.theme.VioletPrimary
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.io.File
+
+private const val LARGE_FILE_BYTE_THRESHOLD = 80_000L
+private const val LARGE_TEXT_CHAR_THRESHOLD = 45_000
+private const val LARGE_LINE_COUNT_THRESHOLD = 450
+private const val MAX_EDITOR_READ_BYTES = 1_500_000L
+private const val CHUNK_MAX_LINES = 100
+private const val CHUNK_MAX_CHARS = 10_000
+
+data class TextChunkSlice(
+    val startLine: Int,
+    val endLine: Int,
+    val content: String
+)
 
 data class OpenEditorTab(
     val filePath: String,
     val fileName: String,
     val language: EditorLanguage,
     val encodingLabel: String,
+    val fileSizeBytes: Long,
     val textContent: String,
     val rawBytes: ByteArray,
     val undoStack: List<String> = emptyList(),
@@ -97,7 +123,13 @@ data class OpenEditorTab(
     val isDirty: Boolean = false,
     val isReadOnly: Boolean = false,
     val isHexMode: Boolean = false,
-    val isLargeFileTruncated: Boolean = false
+    val isLargeFile: Boolean = false,
+    val isLargeFileTruncated: Boolean = false,
+    val isChunkMode: Boolean = false,
+    val highlightingEnabled: Boolean = true,
+    val wordWrap: Boolean = true,
+    val activeChunkIndex: Int = 0,
+    val chunks: List<TextChunkSlice> = emptyList()
 ) {
     override fun equals(other: Any?): Boolean {
         if (this === other) return true
@@ -106,6 +138,7 @@ data class OpenEditorTab(
             fileName == other.fileName &&
             language == other.language &&
             encodingLabel == other.encodingLabel &&
+            fileSizeBytes == other.fileSizeBytes &&
             textContent == other.textContent &&
             rawBytes.contentEquals(other.rawBytes) &&
             undoStack == other.undoStack &&
@@ -113,7 +146,13 @@ data class OpenEditorTab(
             isDirty == other.isDirty &&
             isReadOnly == other.isReadOnly &&
             isHexMode == other.isHexMode &&
-            isLargeFileTruncated == other.isLargeFileTruncated
+            isLargeFile == other.isLargeFile &&
+            isLargeFileTruncated == other.isLargeFileTruncated &&
+            isChunkMode == other.isChunkMode &&
+            highlightingEnabled == other.highlightingEnabled &&
+            wordWrap == other.wordWrap &&
+            activeChunkIndex == other.activeChunkIndex &&
+            chunks == other.chunks
     }
 
     override fun hashCode(): Int {
@@ -121,25 +160,86 @@ data class OpenEditorTab(
         result = 31 * result + textContent.hashCode()
         result = 31 * result + rawBytes.contentHashCode()
         result = 31 * result + isHexMode.hashCode()
+        result = 31 * result + activeChunkIndex
         return result
     }
+}
+
+internal fun splitIntoSafeChunks(text: String): List<TextChunkSlice> {
+    if (text.isEmpty()) return listOf(TextChunkSlice(1, 1, ""))
+    val rawLines = text.split('\n')
+    val result = ArrayList<TextChunkSlice>()
+    val sb = StringBuilder()
+    var chunkStartLine = 1
+    var linesInChunk = 0
+    var currentLineNumber = 1
+
+    for (rawLine in rawLines) {
+        if (rawLine.length > CHUNK_MAX_CHARS) {
+            if (linesInChunk > 0) {
+                result.add(TextChunkSlice(chunkStartLine, currentLineNumber - 1, sb.toString()))
+                sb.clear()
+                linesInChunk = 0
+            }
+            var pos = 0
+            while (pos < rawLine.length) {
+                val end = minOf(pos + CHUNK_MAX_CHARS, rawLine.length)
+                result.add(TextChunkSlice(currentLineNumber, currentLineNumber, rawLine.substring(pos, end)))
+                pos = end
+            }
+            chunkStartLine = currentLineNumber + 1
+            currentLineNumber++
+            continue
+        }
+
+        val wouldExceedLines = linesInChunk >= CHUNK_MAX_LINES
+        val wouldExceedChars = linesInChunk > 0 && sb.length + rawLine.length + 1 > CHUNK_MAX_CHARS
+        if (wouldExceedLines || wouldExceedChars) {
+            result.add(TextChunkSlice(chunkStartLine, currentLineNumber - 1, sb.toString()))
+            sb.clear()
+            linesInChunk = 0
+            chunkStartLine = currentLineNumber
+        }
+        if (linesInChunk > 0) sb.append('\n')
+        sb.append(rawLine)
+        linesInChunk++
+        currentLineNumber++
+    }
+    if (linesInChunk > 0 || result.isEmpty()) {
+        result.add(TextChunkSlice(chunkStartLine, (currentLineNumber - 1).coerceAtLeast(chunkStartLine), sb.toString()))
+    }
+    return result
+}
+
+internal fun rebuildTextFromChunks(chunks: List<TextChunkSlice>): String {
+    if (chunks.isEmpty()) return ""
+    val sb = StringBuilder()
+    for (i in chunks.indices) {
+        sb.append(chunks[i].content)
+        if (i < chunks.lastIndex) {
+            // If next chunk starts on the same logical line (split long line), join without newline
+            val curEnd = chunks[i].endLine
+            val nextStart = chunks[i + 1].startLine
+            if (nextStart > curEnd) sb.append('\n')
+        }
+    }
+    return sb.toString()
 }
 
 private class SyntaxHighlightVisualTransformation(
     private val language: EditorLanguage,
     private val baseColor: Color,
-    private val searchQuery: String
+    private val searchQuery: String,
+    private val highlightingEnabled: Boolean
 ) : VisualTransformation {
     override fun filter(text: AnnotatedString): TransformedText {
         val raw = text.text
         val highlighted = runCatching {
-            SyntaxHighlighter.highlight(raw, language, baseColor, searchQuery)
+            SyntaxHighlighter.highlight(raw, language, baseColor, searchQuery, highlightingEnabled)
+        }.onFailure { err ->
+            AppLogStore.e("SyntaxHighlighter", "Highlight error (${language.label}, len=${raw.length})", err)
         }.getOrElse { AnnotatedString(raw) }
-        val safeAnnotated = if (highlighted.length == raw.length) {
-            highlighted
-        } else {
-            AnnotatedString(raw)
-        }
+        val safeAnnotated = if (highlighted.length == raw.length) highlighted else AnnotatedString(raw)
         return TransformedText(safeAnnotated, OffsetMapping.Identity)
     }
 }
@@ -153,7 +253,9 @@ fun ResourceEditorScreen(
     val tabs = remember { mutableStateListOf<OpenEditorTab>() }
     var activeTabIndex by remember { mutableIntStateOf(0) }
 
+    var isLoadingFile by remember { mutableStateOf(false) }
     var showFindReplace by remember { mutableStateOf(false) }
+    var showVirtualLineJump by remember { mutableStateOf(false) }
     var findQuery by remember { mutableStateOf("") }
     var replaceQuery by remember { mutableStateOf("") }
     var codeFolded by remember { mutableStateOf(false) }
@@ -161,13 +263,16 @@ fun ResourceEditorScreen(
     var hexEditTargetOffset by remember { mutableStateOf<Int?>(null) }
 
     suspend fun loadFileIntoTab(path: String): OpenEditorTab? = withContext(Dispatchers.IO) {
-        runCatching {
+        try {
             val file = File(path)
-            if (!file.exists() || !file.isFile || !file.canRead()) return@withContext null
-            val maxRead = 250_000L
-            val truncated = file.length() > maxRead
+            if (!file.exists() || !file.isFile || !file.canRead()) {
+                AppLogStore.w("ResourceEditor", "File tidak dapat dibaca atau hilang: $path")
+                return@withContext null
+            }
+            val actualSize = file.length().coerceAtLeast(0L)
+            val truncated = actualSize > MAX_EDITOR_READ_BYTES
             val bytes = file.inputStream().use { inp ->
-                val targetLen = minOf(file.length().coerceAtLeast(0L), maxRead).toInt()
+                val targetLen = minOf(actualSize, MAX_EDITOR_READ_BYTES).toInt()
                 val buf = ByteArray(targetLen)
                 var readTotal = 0
                 while (readTotal < buf.size) {
@@ -181,20 +286,48 @@ fun ResourceEditorScreen(
             val (encLabel, charset) = EncodingDetector.detectEncoding(bytes)
             val draft = runCatching { container.database.editorDraftDao().getDraft(file.absolutePath) }.getOrNull()
             val text = draft?.content ?: if (lang == EditorLanguage.HEX) "" else String(bytes, charset)
+
+            val lineCount = if (text.isEmpty()) 1 else text.count { it == '\n' } + 1
+            val isLarge = lang != EditorLanguage.HEX && (
+                actualSize > LARGE_FILE_BYTE_THRESHOLD ||
+                    text.length > LARGE_TEXT_CHAR_THRESHOLD ||
+                    lineCount > LARGE_LINE_COUNT_THRESHOLD
+                )
+            val chunks = if (isLarge) splitIntoSafeChunks(text) else emptyList()
+
+            AppLogStore.updateContext("CodeEditor", file.absolutePath)
+            AppLogStore.i(
+                "ResourceEditor",
+                "Opened ${file.name} (${HashUtils.formatBytes(actualSize)}, $lineCount lines, lang=${lang.label}, chunkMode=$isLarge)"
+            )
+
             OpenEditorTab(
                 filePath = file.absolutePath,
                 fileName = file.name,
                 language = lang,
                 encodingLabel = encLabel,
+                fileSizeBytes = actualSize,
                 textContent = text,
-                rawBytes = bytes,
+                rawBytes = if (isLarge) ByteArray(0) else bytes,
                 isDirty = draft != null,
                 isHexMode = lang == EditorLanguage.HEX,
-                isLargeFileTruncated = truncated
+                isLargeFile = isLarge,
+                isLargeFileTruncated = truncated,
+                isChunkMode = isLarge,
+                highlightingEnabled = !isLarge,
+                wordWrap = true,
+                activeChunkIndex = 0,
+                chunks = chunks
             )
-        }.onFailure { err ->
+        } catch (oom: OutOfMemoryError) {
+            AppLogStore.e("ResourceEditor", "OutOfMemoryError saat membuka $path", oom)
+            statusMessage = "Memori penuh saat memuat file besar. Gunakan mode Hex atau potong file."
+            null
+        } catch (err: Throwable) {
+            AppLogStore.e("ResourceEditor", "Gagal membuka $path", err)
             statusMessage = "Gagal membuka file: ${err.localizedMessage ?: "Izin/IO error"}"
-        }.getOrNull()
+            null
+        }
     }
 
     fun openFile(path: String) {
@@ -204,12 +337,16 @@ fun ResourceEditorScreen(
             return
         }
         scope.launch {
-            val loaded = loadFileIntoTab(path) ?: return@launch
-            if (tabs.none { it.filePath == loaded.filePath }) {
+            isLoadingFile = true
+            val loaded = loadFileIntoTab(path)
+            isLoadingFile = false
+            if (loaded != null && tabs.none { it.filePath == loaded.filePath }) {
                 tabs.add(loaded)
                 activeTabIndex = tabs.lastIndex
                 if (loaded.isDirty) {
                     statusMessage = "Draft auto-save dipulihkan untuk ${loaded.fileName}"
+                } else if (loaded.isLargeFile) {
+                    statusMessage = "File besar (${HashUtils.formatBytes(loaded.fileSizeBytes)}): Mode Virtual Chunk aktif & Highlight dimatikan agar bebas lag."
                 }
             }
         }
@@ -243,26 +380,37 @@ fun ResourceEditorScreen(
                 val destDir = File(container.storageRepository.workspaceDir, "Editor_Imports")
                 container.storageRepository.importUriToDir(uri, destDir, "doc_${System.currentTimeMillis()}.txt")
                     .onSuccess { openFile(it.absolutePath) }
-                    .onFailure { statusMessage = "Gagal impor file: ${it.localizedMessage}" }
+                    .onFailure {
+                        AppLogStore.e("ResourceEditor", "Gagal impor URI $uri", it)
+                        statusMessage = "Gagal impor file: ${it.localizedMessage}"
+                    }
             }
         }
     }
 
     fun updateActiveTab(transform: (OpenEditorTab) -> OpenEditorTab) {
         if (activeTabIndex in tabs.indices) {
-            val updated = transform(tabs[activeTabIndex])
-            tabs[activeTabIndex] = updated
-            if (!updated.isHexMode && updated.isDirty) {
-                scope.launch(Dispatchers.IO) {
-                    runCatching {
-                        container.database.editorDraftDao().saveDraft(
-                            EditorDraftEntity(
-                                filePath = updated.filePath,
-                                content = updated.textContent,
-                                languageName = updated.language.name
-                            )
+            tabs[activeTabIndex] = transform(tabs[activeTabIndex])
+        }
+    }
+
+    // Debounced auto-save draft to avoid Room IO per keystroke
+    val activeTabSnapshot = tabs.getOrNull(activeTabIndex)
+    LaunchedEffect(activeTabSnapshot?.filePath, activeTabSnapshot?.textContent, activeTabSnapshot?.isDirty) {
+        val tab = activeTabSnapshot ?: return@LaunchedEffect
+        if (!tab.isHexMode && tab.isDirty && !tab.isLargeFileTruncated && tab.textContent.length <= 250_000) {
+            delay(900)
+            withContext(Dispatchers.IO) {
+                runCatching {
+                    container.database.editorDraftDao().saveDraft(
+                        EditorDraftEntity(
+                            filePath = tab.filePath,
+                            content = tab.textContent,
+                            languageName = tab.language.name
                         )
-                    }
+                    )
+                }.onFailure { err ->
+                    AppLogStore.w("ResourceEditor", "Gagal simpan draft ${tab.fileName}", err)
                 }
             }
         }
@@ -274,6 +422,10 @@ fun ResourceEditorScreen(
             statusMessage = "Mode Read-Only aktif."
             return
         }
+        if (tab.isLargeFileTruncated && !tab.isHexMode) {
+            statusMessage = "File > 1.5 MB dibuka parsial (baca aman). Gunakan Hex/potong file untuk mencegah kehilangan ekor file."
+            return
+        }
         scope.launch {
             val res = withContext(Dispatchers.IO) {
                 runCatching {
@@ -283,20 +435,30 @@ fun ResourceEditorScreen(
                         runCatching { file.copyTo(bkp, overwrite = true) }
                     }
                     if (tab.isHexMode) {
-                        file.writeBytes(tab.rawBytes)
+                        val bytesToWrite = if (tab.rawBytes.isNotEmpty()) tab.rawBytes else tab.textContent.toByteArray()
+                        file.writeBytes(bytesToWrite)
                     } else {
-                        file.writeText(tab.textContent)
+                        val finalContent = if (tab.isChunkMode && tab.chunks.isNotEmpty()) {
+                            rebuildTextFromChunks(tab.chunks)
+                        } else {
+                            tab.textContent
+                        }
+                        file.writeText(finalContent)
                     }
                     runCatching { container.database.editorDraftDao().clearDraft(tab.filePath) }
                 }
             }
             res.onSuccess {
                 if (activeTabIndex in tabs.indices) {
-                    tabs[activeTabIndex] = tabs[activeTabIndex].copy(isDirty = false)
+                    val cur = tabs[activeTabIndex]
+                    val syncedText = if (cur.isChunkMode && cur.chunks.isNotEmpty()) rebuildTextFromChunks(cur.chunks) else cur.textContent
+                    tabs[activeTabIndex] = cur.copy(isDirty = false, textContent = syncedText)
                 }
+                AppLogStore.i("ResourceEditor", "Saved ${tab.fileName} cleanly")
                 statusMessage = "Tersimpan: ${tab.fileName} (backup tersimpan)"
-            }.onFailure {
-                statusMessage = "Gagal menyimpan: ${it.localizedMessage}"
+            }.onFailure { err ->
+                AppLogStore.e("ResourceEditor", "Gagal menyimpan ${tab.fileName}", err)
+                statusMessage = "Gagal menyimpan: ${err.localizedMessage}"
             }
         }
     }
@@ -326,13 +488,13 @@ fun ResourceEditorScreen(
                     }
                     IconButton(
                         onClick = {
-                            if (current != null && current.undoStack.isNotEmpty() && !current.isReadOnly) {
+                            if (current != null && current.undoStack.isNotEmpty() && !current.isReadOnly && !current.isChunkMode) {
                                 val prev = current.undoStack.last()
                                 updateActiveTab {
                                     it.copy(
                                         textContent = prev,
                                         undoStack = it.undoStack.dropLast(1),
-                                        redoStack = it.redoStack + it.textContent,
+                                        redoStack = (it.redoStack + it.textContent).takeLast(12),
                                         isDirty = true
                                     )
                                 }
@@ -343,12 +505,12 @@ fun ResourceEditorScreen(
                     }
                     IconButton(
                         onClick = {
-                            if (current != null && current.redoStack.isNotEmpty() && !current.isReadOnly) {
+                            if (current != null && current.redoStack.isNotEmpty() && !current.isReadOnly && !current.isChunkMode) {
                                 val next = current.redoStack.last()
                                 updateActiveTab {
                                     it.copy(
                                         textContent = next,
-                                        undoStack = it.undoStack + it.textContent,
+                                        undoStack = (it.undoStack + it.textContent).takeLast(12),
                                         redoStack = it.redoStack.dropLast(1),
                                         isDirty = true
                                     )
@@ -361,13 +523,57 @@ fun ResourceEditorScreen(
                     IconButton(onClick = { showFindReplace = !showFindReplace }) {
                         Icon(Icons.Filled.FindReplace, contentDescription = "Find & Replace")
                     }
-                    IconButton(onClick = { codeFolded = !codeFolded }) {
-                        Icon(
-                            if (codeFolded) Icons.Filled.UnfoldMore else Icons.Filled.UnfoldLess,
-                            contentDescription = "Toggle Code Folding"
-                        )
-                    }
                     if (current != null) {
+                        IconButton(
+                            onClick = {
+                                updateActiveTab { tab ->
+                                    val nextChunkMode = !tab.isChunkMode
+                                    if (nextChunkMode) {
+                                        tab.copy(
+                                            isChunkMode = true,
+                                            isHexMode = false,
+                                            chunks = if (tab.chunks.isNotEmpty()) tab.chunks else splitIntoSafeChunks(tab.textContent),
+                                            activeChunkIndex = 0
+                                        )
+                                    } else {
+                                        val merged = if (tab.chunks.isNotEmpty()) rebuildTextFromChunks(tab.chunks) else tab.textContent
+                                        tab.copy(isChunkMode = false, textContent = merged)
+                                    }
+                                }
+                            },
+                            modifier = Modifier.testTag("editor_chunk_toggle_btn")
+                        ) {
+                            Icon(
+                                Icons.Filled.ViewStream,
+                                contentDescription = "Toggle Virtual Chunk Mode",
+                                tint = if (current.isChunkMode) CyanSecondary else MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+                        IconButton(
+                            onClick = {
+                                updateActiveTab { it.copy(highlightingEnabled = !it.highlightingEnabled) }
+                            },
+                            modifier = Modifier.testTag("editor_highlight_toggle_btn")
+                        ) {
+                            Icon(
+                                Icons.Filled.Palette,
+                                contentDescription = "Toggle Syntax Highlight",
+                                tint = if (current.highlightingEnabled) VioletPrimary else MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+                        IconButton(onClick = { updateActiveTab { it.copy(wordWrap = !it.wordWrap) } }) {
+                            Icon(
+                                Icons.AutoMirrored.Filled.WrapText,
+                                contentDescription = "Toggle Word Wrap",
+                                tint = if (current.wordWrap) StatusSuccess else MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+                        IconButton(onClick = { codeFolded = !codeFolded }) {
+                            Icon(
+                                if (codeFolded) Icons.Filled.UnfoldMore else Icons.Filled.UnfoldLess,
+                                contentDescription = "Toggle Code Folding"
+                            )
+                        }
                         IconButton(onClick = { updateActiveTab { it.copy(isReadOnly = !it.isReadOnly) } }) {
                             Icon(
                                 if (current.isReadOnly) Icons.Filled.Lock else Icons.Filled.LockOpen,
@@ -379,14 +585,17 @@ fun ResourceEditorScreen(
                             onClick = {
                                 updateActiveTab { tab ->
                                     val switchingToHex = !tab.isHexMode
-                                    val syncedBytes = if (switchingToHex && tab.rawBytes.isEmpty() && tab.textContent.isNotEmpty()) {
-                                        tab.textContent.toByteArray()
-                                    } else if (switchingToHex && !tab.isHexMode && tab.isDirty) {
-                                        tab.textContent.toByteArray()
+                                    val textSnapshot = if (tab.isChunkMode && tab.chunks.isNotEmpty()) {
+                                        rebuildTextFromChunks(tab.chunks)
+                                    } else {
+                                        tab.textContent
+                                    }
+                                    val syncedBytes = if (switchingToHex && (tab.rawBytes.isEmpty() || tab.isDirty)) {
+                                        textSnapshot.take(120_000).toByteArray()
                                     } else {
                                         tab.rawBytes
                                     }
-                                    tab.copy(isHexMode = switchingToHex, rawBytes = syncedBytes)
+                                    tab.copy(isHexMode = switchingToHex, rawBytes = syncedBytes, textContent = textSnapshot)
                                 }
                             },
                             modifier = Modifier.testTag("editor_hex_toggle_btn")
@@ -407,6 +616,8 @@ fun ResourceEditorScreen(
                                             HexDumpFormatter.formatAsciiRow(r.bytes)
                                         )
                                     }
+                            } else if (current.isChunkMode && current.chunks.isNotEmpty()) {
+                                current.chunks.getOrNull(current.activeChunkIndex)?.content?.take(8000).orEmpty()
                             } else {
                                 current.textContent.take(8000)
                             }
@@ -415,6 +626,10 @@ fun ResourceEditorScreen(
                             Icon(Icons.Filled.AutoAwesome, contentDescription = "Explain with AI", tint = VioletPrimary)
                         }
                     }
+                }
+
+                if (isLoadingFile) {
+                    LinearProgressIndicator(modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp))
                 }
 
                 if (tabs.isNotEmpty()) {
@@ -485,16 +700,26 @@ fun ResourceEditorScreen(
                         Button(onClick = {
                             val cur = tabs.getOrNull(activeTabIndex)
                             if (cur != null && findQuery.isNotEmpty() && !cur.isReadOnly && !cur.isHexMode) {
-                                val next = cur.textContent.replace(findQuery, replaceQuery, ignoreCase = false)
-                                updateActiveTab {
-                                    it.copy(
-                                        undoStack = (it.undoStack + it.textContent).takeLast(30),
-                                        redoStack = emptyList(),
-                                        textContent = next,
-                                        isDirty = true
+                                if (cur.isChunkMode && cur.chunks.isNotEmpty()) {
+                                    val cIdx = cur.activeChunkIndex.coerceIn(cur.chunks.indices)
+                                    val updatedChunk = cur.chunks[cIdx].copy(
+                                        content = cur.chunks[cIdx].content.replace(findQuery, replaceQuery, ignoreCase = false)
                                     )
+                                    val nextChunks = cur.chunks.toMutableList().also { it[cIdx] = updatedChunk }
+                                    updateActiveTab { it.copy(chunks = nextChunks, isDirty = true) }
+                                    statusMessage = "Diganti pada chunk #${cIdx + 1}"
+                                } else {
+                                    val next = cur.textContent.replace(findQuery, replaceQuery, ignoreCase = false)
+                                    updateActiveTab {
+                                        it.copy(
+                                            undoStack = if (it.isLargeFile) emptyList() else (it.undoStack + it.textContent).takeLast(12),
+                                            redoStack = emptyList(),
+                                            textContent = next,
+                                            isDirty = true
+                                        )
+                                    }
+                                    statusMessage = "Diganti kemunculan '$findQuery'"
                                 }
-                                statusMessage = "Diganti kemunculan '$findQuery'"
                             }
                         }) {
                             Text("All")
@@ -518,10 +743,32 @@ fun ResourceEditorScreen(
             EmptyStatePanel(
                 icon = Icons.Filled.Code,
                 title = "Belum Ada File Terbuka",
-                message = "Buka XML, JSON, Smali, Shell, HTML/CSS/JS, Markdown, atau Binary Hex dari File Manager atau ikon folder di atas.",
+                message = "Buka HTML, XML, JSON, Smali, Shell, CSS/JS, Markdown, atau Binary Hex dari File Manager atau ikon folder di atas.",
                 modifier = Modifier.weight(1f)
             )
         } else {
+            if (activeTab.isLargeFile && !activeTab.isHexMode) {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .background(StatusWarning.copy(alpha = 0.14f))
+                        .padding(horizontal = 12.dp, vertical = 5.dp)
+                        .testTag("large_file_warning_banner"),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(6.dp)
+                ) {
+                    Icon(Icons.Filled.Warning, contentDescription = null, tint = StatusWarning, modifier = Modifier.size(15.dp))
+                    Text(
+                        text = "File besar (${HashUtils.formatBytes(activeTab.fileSizeBytes)}): Mode Virtual Chunk aktif & Highlight ${if (activeTab.highlightingEnabled) "ON" else "OFF"} agar bebas Force Close.",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = StatusWarning,
+                        modifier = Modifier.weight(1f),
+                        maxLines = 2,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                }
+            }
+
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
@@ -531,13 +778,19 @@ fun ResourceEditorScreen(
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 Text(
-                    text = "${if (activeTab.isHexMode) "HEX" else activeTab.language.label} • ${activeTab.encodingLabel}${if (activeTab.isReadOnly) " • READ-ONLY" else ""}",
+                    text = "${if (activeTab.isHexMode) "HEX" else activeTab.language.label} • ${activeTab.encodingLabel}${if (activeTab.isChunkMode) " • CHUNK" else ""}${if (activeTab.isReadOnly) " • READ-ONLY" else ""}",
                     style = MaterialTheme.typography.labelSmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
                 Text(
-                    text = if (activeTab.isHexMode) "${activeTab.rawBytes.size} bytes"
-                    else "${activeTab.textContent.lines().size} baris",
+                    text = when {
+                        activeTab.isHexMode -> "${activeTab.rawBytes.size} bytes"
+                        activeTab.isChunkMode && activeTab.chunks.isNotEmpty() -> {
+                            val c = activeTab.chunks[activeTab.activeChunkIndex.coerceIn(activeTab.chunks.indices)]
+                            "Baris ${c.startLine}-${c.endLine} (${activeTab.activeChunkIndex + 1}/${activeTab.chunks.size})"
+                        }
+                        else -> "${HashUtils.formatBytes(activeTab.fileSizeBytes)}"
+                    },
                     style = MaterialTheme.typography.labelSmall,
                     color = CyanSecondary
                 )
@@ -563,7 +816,7 @@ fun ResourceEditorScreen(
                             .padding(8.dp)
                             .testTag("hex_viewer_list")
                     ) {
-                        items(rows, key = { it.offset }) { row ->
+                        itemsIndexed(rows, key = { _, r -> r.offset }) { _, row ->
                             Row(
                                 modifier = Modifier
                                     .fillMaxWidth()
@@ -610,6 +863,115 @@ fun ResourceEditorScreen(
                         }
                     }
                 }
+            } else if (activeTab.isChunkMode && activeTab.chunks.isNotEmpty()) {
+                val safeChunkIdx = activeTab.activeChunkIndex.coerceIn(activeTab.chunks.indices)
+                val currentChunk = activeTab.chunks[safeChunkIdx]
+                val chunkLineCount = remember(currentChunk.content) {
+                    if (currentChunk.content.isEmpty()) 1 else currentChunk.content.count { it == '\n' } + 1
+                }
+                val chunkLineNumbers = remember(currentChunk.startLine, chunkLineCount) {
+                    (0 until chunkLineCount).joinToString("\n") { "${currentChunk.startLine + it}" }
+                }
+                val visualTransform = remember(activeTab.language, findQuery, activeTab.highlightingEnabled) {
+                    SyntaxHighlightVisualTransformation(
+                        language = activeTab.language,
+                        baseColor = Color(0xFFE2E8F0),
+                        searchQuery = findQuery,
+                        highlightingEnabled = activeTab.highlightingEnabled
+                    )
+                }
+
+                // Chunk navigation bar
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .background(MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.25f))
+                        .padding(horizontal = 8.dp, vertical = 4.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.SpaceBetween
+                ) {
+                    OutlinedButton(
+                        onClick = {
+                            if (safeChunkIdx > 0) {
+                                updateActiveTab { it.copy(activeChunkIndex = safeChunkIdx - 1) }
+                            }
+                        },
+                        enabled = safeChunkIdx > 0
+                    ) {
+                        Icon(Icons.AutoMirrored.Filled.KeyboardArrowLeft, contentDescription = "Prev Chunk", modifier = Modifier.size(16.dp))
+                        Text("Prev", style = MaterialTheme.typography.labelSmall)
+                    }
+                    TextButton(onClick = { showVirtualLineJump = true }) {
+                        Text(
+                            "Chunk ${safeChunkIdx + 1}/${activeTab.chunks.size} • Lompat Baris",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = CyanSecondary
+                        )
+                    }
+                    OutlinedButton(
+                        onClick = {
+                            if (safeChunkIdx < activeTab.chunks.lastIndex) {
+                                updateActiveTab { it.copy(activeChunkIndex = safeChunkIdx + 1) }
+                            }
+                        },
+                        enabled = safeChunkIdx < activeTab.chunks.lastIndex
+                    ) {
+                        Text("Next", style = MaterialTheme.typography.labelSmall)
+                        Icon(Icons.AutoMirrored.Filled.KeyboardArrowRight, contentDescription = "Next Chunk", modifier = Modifier.size(16.dp))
+                    }
+                }
+
+                Row(
+                    modifier = Modifier
+                        .weight(1f)
+                        .fillMaxWidth()
+                        .background(Color(0xFF070A12))
+                        .verticalScroll(rememberScrollState())
+                        .padding(vertical = 8.dp)
+                ) {
+                    Text(
+                        text = chunkLineNumbers,
+                        style = TextStyle(
+                            fontFamily = JetBrainsMonoFontFamily,
+                            fontSize = 12.sp,
+                            lineHeight = 19.sp,
+                            color = Color(0xFF475569)
+                        ),
+                        modifier = Modifier.width(46.dp).padding(start = 6.dp, end = 8.dp)
+                    )
+                    Box(
+                        modifier = Modifier
+                            .weight(1f)
+                            .then(if (!activeTab.wordWrap) Modifier.horizontalScroll(rememberScrollState()) else Modifier)
+                            .padding(end = 12.dp)
+                    ) {
+                        BasicTextField(
+                            value = currentChunk.content,
+                            onValueChange = { nextChunkText ->
+                                if (!activeTab.isReadOnly) {
+                                    val updatedChunks = activeTab.chunks.toMutableList()
+                                    updatedChunks[safeChunkIdx] = currentChunk.copy(content = nextChunkText)
+                                    updateActiveTab {
+                                        it.copy(chunks = updatedChunks, isDirty = true)
+                                    }
+                                }
+                            },
+                            readOnly = activeTab.isReadOnly,
+                            visualTransformation = visualTransform,
+                            textStyle = TextStyle(
+                                fontFamily = JetBrainsMonoFontFamily,
+                                fontSize = 12.sp,
+                                lineHeight = 19.sp,
+                                color = Color(0xFFE2E8F0)
+                            ),
+                            cursorBrush = SolidColor(CyanSecondary),
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .then(if (!activeTab.wordWrap) Modifier.widthIn(min = 340.dp) else Modifier)
+                                .testTag("code_editor_input")
+                        )
+                    }
+                }
             } else {
                 val displayText = remember(activeTab.textContent, codeFolded) {
                     if (!codeFolded) activeTab.textContent
@@ -617,12 +979,18 @@ fun ResourceEditorScreen(
                         i == 0 || !line.startsWith("    ")
                     }.joinToString("\n")
                 }
-                val linesCount = remember(displayText) { displayText.lines().size.coerceAtLeast(1) }
-                val visualTransform = remember(activeTab.language, findQuery) {
+                val linesCount = remember(displayText) {
+                    if (displayText.isEmpty()) 1 else displayText.count { it == '\n' } + 1
+                }
+                val lineNumbersText = remember(linesCount) {
+                    (1..linesCount).joinToString("\n")
+                }
+                val visualTransform = remember(activeTab.language, findQuery, activeTab.highlightingEnabled) {
                     SyntaxHighlightVisualTransformation(
                         language = activeTab.language,
                         baseColor = Color(0xFFE2E8F0),
-                        searchQuery = findQuery
+                        searchQuery = findQuery,
+                        highlightingEnabled = activeTab.highlightingEnabled
                     )
                 }
 
@@ -634,39 +1002,35 @@ fun ResourceEditorScreen(
                         .verticalScroll(rememberScrollState())
                         .padding(vertical = 8.dp)
                 ) {
-                    Column(
-                        modifier = Modifier
-                            .width(42.dp)
-                            .padding(end = 8.dp),
-                        horizontalAlignment = Alignment.End
-                    ) {
-                        for (i in 1..linesCount) {
-                            Text(
-                                text = "$i",
-                                style = TextStyle(
-                                    fontFamily = JetBrainsMonoFontFamily,
-                                    fontSize = 12.sp,
-                                    lineHeight = 19.sp,
-                                    color = Color(0xFF475569)
-                                )
-                            )
-                        }
-                    }
+                    Text(
+                        text = lineNumbersText,
+                        style = TextStyle(
+                            fontFamily = JetBrainsMonoFontFamily,
+                            fontSize = 12.sp,
+                            lineHeight = 19.sp,
+                            color = Color(0xFF475569)
+                        ),
+                        modifier = Modifier.width(42.dp).padding(start = 6.dp, end = 8.dp)
+                    )
 
                     Box(
                         modifier = Modifier
                             .weight(1f)
-                            .horizontalScroll(rememberScrollState())
-                            .padding(end = 16.dp)
+                            .then(if (!activeTab.wordWrap) Modifier.horizontalScroll(rememberScrollState()) else Modifier)
+                            .padding(end = 14.dp)
                     ) {
                         BasicTextField(
                             value = displayText,
                             onValueChange = { nextVal ->
                                 if (!activeTab.isReadOnly && !codeFolded) {
-                                    val withIndent = applyAutoIndent(activeTab.textContent, nextVal)
+                                    val withIndent = if (!activeTab.isLargeFile) {
+                                        applyAutoIndent(activeTab.textContent, nextVal)
+                                    } else {
+                                        nextVal
+                                    }
                                     updateActiveTab {
                                         it.copy(
-                                            undoStack = (it.undoStack + it.textContent).takeLast(30),
+                                            undoStack = if (it.isLargeFile || it.textContent.length > 35_000) emptyList() else (it.undoStack + it.textContent).takeLast(12),
                                             redoStack = emptyList(),
                                             textContent = withIndent,
                                             isDirty = true
@@ -684,7 +1048,8 @@ fun ResourceEditorScreen(
                             ),
                             cursorBrush = SolidColor(CyanSecondary),
                             modifier = Modifier
-                                .widthIn(min = 340.dp)
+                                .fillMaxWidth()
+                                .then(if (!activeTab.wordWrap) Modifier.widthIn(min = 340.dp) else Modifier)
                                 .testTag("code_editor_input")
                         )
                     }
@@ -694,6 +1059,50 @@ fun ResourceEditorScreen(
     }
 
     val active = tabs.getOrNull(activeTabIndex)
+    if (showVirtualLineJump && active != null && active.chunks.isNotEmpty()) {
+        AlertDialog(
+            onDismissRequest = { showVirtualLineJump = false },
+            title = { Text("Pilih Chunk / Lompat Baris") },
+            text = {
+                LazyColumn(
+                    modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp),
+                    verticalArrangement = Arrangement.spacedBy(4.dp)
+                ) {
+                    itemsIndexed(active.chunks) { idx, slice ->
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clip(RoundedCornerShape(8.dp))
+                                .background(
+                                    if (idx == active.activeChunkIndex) MaterialTheme.colorScheme.primaryContainer
+                                    else MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.4f)
+                                )
+                                .clickable {
+                                    updateActiveTab { it.copy(activeChunkIndex = idx) }
+                                    showVirtualLineJump = false
+                                }
+                                .padding(horizontal = 10.dp, vertical = 8.dp),
+                            horizontalArrangement = Arrangement.SpaceBetween
+                        ) {
+                            Text(
+                                "Chunk #${idx + 1} (Baris ${slice.startLine}–${slice.endLine})",
+                                style = MaterialTheme.typography.labelLarge
+                            )
+                            Text(
+                                "${slice.content.length} chr",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = CyanSecondary
+                            )
+                        }
+                    }
+                }
+            },
+            confirmButton = {
+                TextButton(onClick = { showVirtualLineJump = false }) { Text("Tutup") }
+            }
+        )
+    }
+
     hexEditTargetOffset?.let { offset ->
         if (active != null && offset in active.rawBytes.indices) {
             var hexInput by remember(offset) { mutableStateOf(HexDumpFormatter.formatByteHex(active.rawBytes[offset])) }

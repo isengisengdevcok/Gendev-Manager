@@ -22,8 +22,10 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Android
 import androidx.compose.material.icons.filled.AutoAwesome
 import androidx.compose.material.icons.filled.Backup
+import androidx.compose.material.icons.filled.DeleteOutline
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Search
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.compose.material3.Button
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.Icon
@@ -53,6 +55,8 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.example.core.apk.InstalledAppSummary
 import com.example.core.common.AppContainer
+import com.example.core.common.AppLogLevel
+import com.example.core.common.AppLogStore
 import com.example.core.common.HashUtils
 import com.example.core.device.BatteryDetails
 import com.example.core.device.DeviceEnvironmentInfo
@@ -87,6 +91,8 @@ fun ToolsScreen(
     var battery by remember { mutableStateOf<BatteryDetails?>(null) }
     var logcatLines by remember { mutableStateOf<List<String>>(emptyList()) }
     var logFilter by remember { mutableStateOf("ALL") }
+    var showAppSourceLogs by remember { mutableStateOf(true) }
+    val appSourceLogs by AppLogStore.logs.collectAsStateWithLifecycle()
     var networkSummary by remember { mutableStateOf<List<Pair<String, String>>>(emptyList()) }
     var isBusy by remember { mutableStateOf(false) }
     var statusMessage by remember { mutableStateOf<String?>(null) }
@@ -301,6 +307,26 @@ fun ToolsScreen(
                 Column(modifier = Modifier.weight(1f).padding(12.dp)) {
                     Row(
                         modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        FilterChip(
+                            selected = showAppSourceLogs,
+                            onClick = { showAppSourceLogs = true },
+                            label = { Text("Source Log (${appSourceLogs.size})") }
+                        )
+                        FilterChip(
+                            selected = !showAppSourceLogs,
+                            onClick = {
+                                showAppSourceLogs = false
+                                if (logcatLines.isEmpty()) loadLogcat()
+                            },
+                            label = { Text("System Logcat") }
+                        )
+                    }
+                    Spacer(modifier = Modifier.height(6.dp))
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
                         horizontalArrangement = Arrangement.spacedBy(6.dp),
                         verticalAlignment = Alignment.CenterVertically
                     ) {
@@ -312,12 +338,22 @@ fun ToolsScreen(
                             )
                         }
                         Spacer(modifier = Modifier.weight(1f))
-                        OutlinedButton(onClick = { loadLogcat() }) {
-                            Icon(Icons.Filled.Refresh, contentDescription = "Refresh Logcat", modifier = Modifier.size(16.dp))
+                        if (showAppSourceLogs) {
+                            OutlinedButton(onClick = { AppLogStore.clearLogs() }) {
+                                Icon(Icons.Filled.DeleteOutline, contentDescription = "Clear App Source Logs", modifier = Modifier.size(16.dp))
+                            }
+                        } else {
+                            OutlinedButton(onClick = { loadLogcat() }) {
+                                Icon(Icons.Filled.Refresh, contentDescription = "Refresh Logcat", modifier = Modifier.size(16.dp))
+                            }
                         }
                         Button(onClick = {
-                            val snippet = logcatLines.takeLast(80).joinToString("\n")
-                            onAskAi("Device Logcat Dump", snippet)
+                            if (showAppSourceLogs) {
+                                onAskAi("App Source Log Diagnostic", AppLogStore.buildAiDiagnosticSnapshot())
+                            } else {
+                                val snippet = logcatLines.takeLast(80).joinToString("\n")
+                                onAskAi("Device Logcat Dump", snippet)
+                            }
                         }) {
                             Icon(Icons.Filled.AutoAwesome, contentDescription = null, modifier = Modifier.size(16.dp))
                             Spacer(modifier = Modifier.width(4.dp))
@@ -325,32 +361,78 @@ fun ToolsScreen(
                         }
                     }
                     Spacer(modifier = Modifier.height(8.dp))
-                    val shown = remember(logcatLines, logFilter) {
-                        if (logFilter == "ALL") logcatLines
-                        else logcatLines.filter { it.contains(" $logFilter") }
-                    }
-                    LazyColumn(
-                        modifier = Modifier
-                            .weight(1f)
-                            .fillMaxWidth()
-                            .clip(RoundedCornerShape(12.dp))
-                            .background(androidx.compose.ui.graphics.Color(0xFF060911))
-                            .padding(10.dp),
-                        verticalArrangement = Arrangement.spacedBy(3.dp)
-                    ) {
-                        items(shown) { line ->
-                            val c = when {
-                                line.contains(" E/") || line.contains("FATAL") -> StatusDanger
-                                line.contains(" W/") -> StatusWarning
-                                line.contains(" I/") -> EmeraldTertiary
-                                else -> androidx.compose.ui.graphics.Color(0xFFCBD5E1)
+                    if (showAppSourceLogs) {
+                        val shownApp = remember(appSourceLogs, logFilter) {
+                            appSourceLogs.filter { entry ->
+                                when (logFilter) {
+                                    "E/" -> entry.level == AppLogLevel.ERROR || entry.level == AppLogLevel.CRASH
+                                    "W/" -> entry.level == AppLogLevel.WARN
+                                    "I/" -> entry.level == AppLogLevel.INFO
+                                    else -> true
+                                }
+                            }.reversed()
+                        }
+                        LazyColumn(
+                            modifier = Modifier
+                                .weight(1f)
+                                .fillMaxWidth()
+                                .clip(RoundedCornerShape(12.dp))
+                                .background(androidx.compose.ui.graphics.Color(0xFF060911))
+                                .padding(10.dp),
+                            verticalArrangement = Arrangement.spacedBy(4.dp)
+                        ) {
+                            items(shownApp, key = { it.id }) { entry ->
+                                val c = when (entry.level) {
+                                    AppLogLevel.CRASH, AppLogLevel.ERROR -> StatusDanger
+                                    AppLogLevel.WARN -> StatusWarning
+                                    AppLogLevel.INFO -> EmeraldTertiary
+                                }
+                                Column {
+                                    Text(
+                                        text = "[${entry.formattedTime}] [${entry.level.tag}] [${entry.source}] ${entry.message}",
+                                        style = MaterialTheme.typography.labelSmall,
+                                        fontFamily = JetBrainsMonoFontFamily,
+                                        color = c
+                                    )
+                                    entry.stackTrace?.takeIf { it.isNotBlank() }?.let { stack ->
+                                        Text(
+                                            text = stack.take(350),
+                                            style = MaterialTheme.typography.labelSmall,
+                                            fontFamily = JetBrainsMonoFontFamily,
+                                            color = androidx.compose.ui.graphics.Color(0xFF94A3B8)
+                                        )
+                                    }
+                                }
                             }
-                            Text(
-                                text = line,
-                                style = MaterialTheme.typography.labelSmall,
-                                fontFamily = JetBrainsMonoFontFamily,
-                                color = c
-                            )
+                        }
+                    } else {
+                        val shown = remember(logcatLines, logFilter) {
+                            if (logFilter == "ALL") logcatLines
+                            else logcatLines.filter { it.contains(" $logFilter") }
+                        }
+                        LazyColumn(
+                            modifier = Modifier
+                                .weight(1f)
+                                .fillMaxWidth()
+                                .clip(RoundedCornerShape(12.dp))
+                                .background(androidx.compose.ui.graphics.Color(0xFF060911))
+                                .padding(10.dp),
+                            verticalArrangement = Arrangement.spacedBy(3.dp)
+                        ) {
+                            items(shown) { line ->
+                                val c = when {
+                                    line.contains(" E/") || line.contains("FATAL") -> StatusDanger
+                                    line.contains(" W/") -> StatusWarning
+                                    line.contains(" I/") -> EmeraldTertiary
+                                    else -> androidx.compose.ui.graphics.Color(0xFFCBD5E1)
+                                }
+                                Text(
+                                    text = line,
+                                    style = MaterialTheme.typography.labelSmall,
+                                    fontFamily = JetBrainsMonoFontFamily,
+                                    color = c
+                                )
+                            }
                         }
                     }
                 }

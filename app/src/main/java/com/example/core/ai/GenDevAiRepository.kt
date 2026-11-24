@@ -1,6 +1,7 @@
 package com.example.core.ai
 
 import android.util.Log
+import com.example.core.common.AppLogStore
 import com.example.core.data.AiProviderMode
 import com.example.core.data.GenDevSettings
 import com.google.firebase.Firebase
@@ -82,15 +83,38 @@ class GenDevAiRepository {
         prompt: String,
         attachedContext: String?,
         settings: GenDevSettings,
-        recentHistory: List<Pair<String, String>> = emptyList()
+        recentHistory: List<Pair<String, String>> = emptyList(),
+        includeSourceLogs: Boolean = false
     ): Flow<AiStreamEvent> = flow {
         val trimmedContext = attachedContext?.trim()?.takeIf { it.isNotEmpty() }
         val contextLimit = if (settings.aiFastMode) 7_000 else 14_000
+        val mentionsLogsOrCrash = prompt.contains("log", ignoreCase = true) ||
+            prompt.contains("error", ignoreCase = true) ||
+            prompt.contains("eror", ignoreCase = true) ||
+            prompt.contains("crash", ignoreCase = true) ||
+            prompt.contains("force close", ignoreCase = true) ||
+            prompt.contains(" fc", ignoreCase = true) ||
+            prompt.contains("bug", ignoreCase = true) ||
+            prompt.contains("source", ignoreCase = true)
+        val shouldAttachLogs = (includeSourceLogs || mentionsLogsOrCrash) &&
+            (trimmedContext == null || !trimmedContext.contains("GENDEV MANAGER SOURCE LOG DIAGNOSTIC"))
+        val sourceLogSnapshot = if (shouldAttachLogs) {
+            val hasErrs = AppLogStore.errorCount() > 0
+            AppLogStore.buildAiDiagnosticSnapshot(
+                maxEntries = if (settings.aiFastMode) 16 else 30,
+                errorsOnly = hasErrs && !mentionsLogsOrCrash
+            ).take(if (settings.aiFastMode) 3_500 else 6_500)
+        } else null
+
         val fullPrompt = buildString {
             append(prompt.trim())
             if (trimmedContext != null) {
                 append("\n\n--- ATTACHED CONTEXT ---\n")
                 append(trimmedContext.take(contextLimit))
+            }
+            if (!sourceLogSnapshot.isNullOrBlank()) {
+                append("\n\n--- APP SOURCE LOG DIAGNOSTIC ---\n")
+                append(sourceLogSnapshot)
             }
         }
         val compactHistory = recentHistory.takeLast(if (settings.aiFastMode) 4 else 8)
@@ -128,6 +152,7 @@ class GenDevAiRepository {
                         throw e
                     } catch (e: Exception) {
                         Log.e(TAG, "Gemini REST API key call failed", e)
+                        AppLogStore.e("GenDevAI", "Gemini REST call failed ($modelId): ${e.localizedMessage}", e)
                         val offline = OfflineEngineeringAnalyzer.analyzeLocally(prompt, attachedContext)
                         emit(
                             AiStreamEvent.Failed(
@@ -171,6 +196,7 @@ class GenDevAiRepository {
                         throw e
                     } catch (e: Exception) {
                         Log.e(TAG, "Custom AI endpoint call failed", e)
+                        AppLogStore.e("GenDevAI", "Custom endpoint failed (${settings.customAiModel}): ${e.localizedMessage}", e)
                         val offline = OfflineEngineeringAnalyzer.analyzeLocally(prompt, attachedContext)
                         emit(
                             AiStreamEvent.Failed(
@@ -226,6 +252,7 @@ class GenDevAiRepository {
                     }
                 } catch (e: TimeoutCancellationException) {
                     Log.e(TAG, "Firebase AI timed out after ${firebaseTimeout}ms", e)
+                    AppLogStore.w("GenDevAI", "Firebase AI timeout (${firebaseTimeout}ms)", e)
                     emit(
                         handleFirebaseFallback(
                             prompt = prompt,
@@ -240,6 +267,7 @@ class GenDevAiRepository {
                     throw e
                 } catch (e: Exception) {
                     Log.e(TAG, "Firebase AI generation failed", e)
+                    AppLogStore.e("GenDevAI", "Firebase AI failed: ${e.localizedMessage}", e)
                     emit(
                         handleFirebaseFallback(
                             prompt = prompt,
@@ -326,6 +354,7 @@ class GenDevAiRepository {
                 throw e
             } catch (e: Exception) {
                 Log.e(TAG, "Gemini key fallback also failed", e)
+                AppLogStore.e("GenDevAI", "Gemini key fallback failed ($modelId): ${e.localizedMessage}", e)
             }
         }
         val offline = OfflineEngineeringAnalyzer.analyzeLocally(prompt, attachedContext)
@@ -545,9 +574,10 @@ class GenDevAiRepository {
         private const val SYSTEM_PROMPT =
             """You are GENDEV AI, an expert senior Android systems, APK reverse-engineering, DEX/Smali, Gradle, and security assistant inside GENDEV MANAGER.
 Provide concise, accurate, actionable technical guidance (respond in Indonesian or English matching the user's language).
+When APP SOURCE LOG DIAGNOSTIC is provided, analyze recorded crashes, Force Close stack traces, OutOfMemoryError/ANR bottlenecks, or API/IO failures and give concrete code-level development fixes.
 Safety rules: Never advise executing destructive root commands without explicit user review, never invent fake APK signatures, and clearly label any command before the user runs it in Terminal."""
 
         private const val SYSTEM_PROMPT_FAST =
-            """You are GENDEV AI inside GENDEV MANAGER. Answer directly, concisely, and accurately in the user's language (Indonesian/English) using short bullet points and exact code/Smali/shell snippets without long intros."""
+            """You are GENDEV AI inside GENDEV MANAGER. Answer directly, concisely, and accurately in the user's language (Indonesian/English) using short bullet points and exact code/Smali/shell snippets without long intros. If APP SOURCE LOG DIAGNOSTIC is attached, pinpoint the root cause & fix."""
     }
 }

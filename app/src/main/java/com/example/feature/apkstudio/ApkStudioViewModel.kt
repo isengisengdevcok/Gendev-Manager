@@ -9,6 +9,7 @@ import com.example.core.apk.ApkInspectionResult
 import com.example.core.apk.ApkRebuildResult
 import com.example.core.apk.InstalledAppSummary
 import com.example.core.common.AppContainer
+import com.example.core.common.AppLogStore
 import com.example.core.data.RecentFileEntity
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -91,6 +92,7 @@ class ApkStudioViewModel(private val container: AppContainer) : ViewModel() {
                     _uiState.update { it.copy(activeApk = result, isLoading = false) }
                 }
                 .onFailure { err ->
+                    AppLogStore.e("ApkStudio", "Inspect APK failed (${file.name}): ${err.localizedMessage}", err)
                     _uiState.update {
                         it.copy(isLoading = false, statusMessage = "Failed to inspect APK: ${err.localizedMessage}")
                     }
@@ -105,6 +107,7 @@ class ApkStudioViewModel(private val container: AppContainer) : ViewModel() {
             imported
                 .onSuccess { inspectApkPath(it.absolutePath) }
                 .onFailure {
+                    AppLogStore.e("ApkStudio", "Import APK URI failed ($name): ${it.localizedMessage}", it)
                     _uiState.update { s -> s.copy(isLoading = false, statusMessage = "Import failed: ${it.localizedMessage}") }
                 }
         }
@@ -197,6 +200,7 @@ class ApkStudioViewModel(private val container: AppContainer) : ViewModel() {
                     }
                 }
                 .onFailure { err ->
+                    AppLogStore.e("ApkStudio", "Rebuild/sign APK failed (${src.name}): ${err.localizedMessage}", err)
                     container.sharedBus.updateBuildStatus("Build Failed")
                     _uiState.update {
                         it.copy(
