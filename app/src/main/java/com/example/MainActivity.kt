@@ -231,6 +231,8 @@ fun GenDevRootShell(container: AppContainer) {
                                 label = {
                                     Text(
                                         text = item.label,
+                                        style = MaterialTheme.typography.labelSmall,
+                                        softWrap = false,
                                         maxLines = 1,
                                         overflow = TextOverflow.Ellipsis
                                     )

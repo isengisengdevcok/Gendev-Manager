@@ -2,12 +2,14 @@ package com.example
 
 import android.content.Context
 import androidx.compose.ui.test.assertIsDisplayed
+import androidx.compose.ui.test.hasTestTag
 import androidx.compose.ui.test.junit4.createComposeRule
 import androidx.compose.ui.test.onAllNodesWithTag
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.performScrollTo
+import androidx.compose.ui.test.performScrollToNode
 import androidx.test.core.app.ApplicationProvider
 import com.example.core.ai.GenDevAiRepository
 import com.example.core.common.AppContainer
@@ -93,6 +95,18 @@ class GenDevComposeUiTests {
         composeRule.onNodeWithTag("phone_directory_storage_bar").performClick()
         composeRule.waitForIdle()
         assertTrue(!openedPhonePath.isNullOrEmpty())
+
+        listOf(
+            "quick_files_btn",
+            "quick_apk_btn",
+            "quick_dex_btn",
+            "quick_editor_btn",
+            "quick_terminal_btn",
+            "quick_ai_btn"
+        ).forEach { tag ->
+            composeRule.onNodeWithTag("home_dashboard_list").performScrollToNode(hasTestTag(tag))
+            composeRule.onNodeWithTag(tag).assertIsDisplayed()
+        }
     }
 
     @Test
